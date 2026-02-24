@@ -1,0 +1,71 @@
+{
+  "version": 3,
+  "targets": {
+    "net8.0": {}
+  },
+  "libraries": {},
+  "projectFileDependencyGroups": {
+    "net8.0": []
+  },
+  "packageFolders": {
+    "/Users/damien/.nuget/packages/": {}
+  },
+  "project": {
+    "version": "1.0.0",
+    "restore": {
+      "projectUniqueName": "/Users/damien/groupe-atlantic/repos/groupe-atlantic-initiation-docker/HelloMultiStage.csproj",
+      "projectName": "HelloMultiStage",
+      "projectPath": "/Users/damien/groupe-atlantic/repos/groupe-atlantic-initiation-docker/HelloMultiStage.csproj",
+      "packagesPath": "/Users/damien/.nuget/packages/",
+      "outputPath": "/Users/damien/groupe-atlantic/repos/groupe-atlantic-initiation-docker/obj/",
+      "projectStyle": "PackageReference",
+      "configFilePaths": [
+        "/Users/damien/.nuget/NuGet/NuGet.Config"
+      ],
+      "originalTargetFrameworks": [
+        "net8.0"
+      ],
+      "sources": {
+        "https://api.nuget.org/v3/index.json": {},
+        "https://pkgs.dev.azure.com/groupe-atlantic-synergy-digital/Common-Libraries/_packaging/Tools/nuget/v3/index.json": {},
+        "https://pkgs.dev.azure.com/groupe-atlantic-synergy-digital/Datahub/_packaging/Datahub_Private_Feed/nuget/v3/index.json": {}
+      },
+      "frameworks": {
+        "net8.0": {
+          "targetAlias": "net8.0",
+          "projectReferences": {}
+        }
+      },
+      "warningProperties": {
+        "warnAsError": [
+          "NU1605"
+        ]
+      }
+    },
+    "frameworks": {
+      "net8.0": {
+        "targetAlias": "net8.0",
+        "imports": [
+          "net461",
+          "net462",
+          "net47",
+          "net471",
+          "net472",
+          "net48",
+          "net481"
+        ],
+        "assetTargetFallback": true,
+        "warn": true,
+        "frameworkReferences": {
+          "Microsoft.AspNetCore.App": {
+            "privateAssets": "none"
+          },
+          "Microsoft.NETCore.App": {
+            "privateAssets": "all"
+          }
+        },
+        "runtimeIdentifierGraphPath": "/opt/homebrew/Cellar/dotnet@8/8.0.124/libexec/sdk/8.0.124/PortableRuntimeIdentifierGraph.json"
+      }
+    }
+  }
+}

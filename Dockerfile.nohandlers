@@ -1,0 +1,32 @@
+FROM node:25-alpine
+
+WORKDIR /app
+
+COPY . .
+
+# Réécriture du server.js sans les handlers GIGINT et SIGTERM
+RUN cat > server.js <<'EOF'
+const express = require("express");
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get("/", (req, res) => {
+  res.json({
+    title: "Hello Docker !",
+    message: "Le endpoint / fonctionne correctement !",
+  });
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+EOF
+
+RUN npm ci
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/ || exit 1
+
+CMD ["node", "server.js"]

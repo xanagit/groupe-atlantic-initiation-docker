@@ -16,12 +16,14 @@ app.listen(PORT, () => {
 // Gère l'arrêt Ctrl+C
 process.on('SIGINT', () => {
   console.log('Shutting down...');
-  process.exit(0);
+  // Attend que les connexions en cours se terminent avant de quitter
+  server.close(() => process.exit(0));
 });
 
 // Gère l'arrêt docker stop
 process.on('SIGTERM', () => {
   console.log('Shutting down...');
-  process.exit(0);
+  // Attend que les connexions en cours se terminent avant de quitter
+   server.close(() => process.exit(0));
 });
 

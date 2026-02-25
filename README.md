@@ -1,163 +1,121 @@
-# Build Multi-Stage
+# Build Multi-Stage : solution
 
 [⬅️ 01-dockerisation-simple](../../tree/01-dockerisation-simple) ·
 [📋 Sommaire](../../tree/main) ·
 [03-docker-compose ➡️](../../tree/03-docker-compose)
 
-💡 [Voir la solution](../../tree/02-multi-stage--solution)
+📝 [Retour à l'énoncé](../../tree/02-multi-stage)
 
 ---
 
-## Pourquoi le multi-stage ?
+## Rappel de l'objectif
 
-Lorsqu'on conteneurise une application compilée (`C#`, `Java`, `Go`, ...), le processus de build nécessite des outils lourds (SDK, compilateur, dépendances de développement) qui n'ont pas d'utilité en production.
+Adapter le Dockerfile et le rendre multi-stage afin de produire une image de production légère.
 
-Sans multi-stage, on se retrouve avec une image qui contient tout : le SDK, le code source, les fichiers intermédiaires de compilation avec le binaire final => l'image est volumineuse, lente à transférer et présente une surface d'attaque élargie.
+## Solution
 
-Le build multi-stage résout ce problème en découpant le `Dockerfile` en plusieurs étapes (`FROM`). Chaque étape produit un environnement (stage) temporaire et seuls les artefacts nécessaires sont copiés d'un stage à l'autre via `COPY --from=<stage>`.
-
-### Avantages
-
-| Critère                  | Sans multi-stage                            | Avec multi-stage                        |
-| ------------------------ | ------------------------------------------- | --------------------------------------- |
-| Taille de l'image        | Très volumineuse (SDK + sources + binaires) | Réduite (runtime + binaires uniquement) |
-| Surface d'attaque        | Large (compilateur, outils de dev présents) | Minimale (que le strict nécessaire)     |
-| Temps de pull / push     | Long                                        | Court                                   |
-
-### Principe
+### Dockerfile multi-stage (`Dockerfile`)
 
 ```dockerfile
 # ---------- Stage 1 : Build ----------
-FROM sdk-image AS build
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
+
+# Copie du csproj et du code
 COPY . .
-RUN <commande de compilation / publication>
+
+# Restore des dépendances
+RUN dotnet restore
+
+# Publish
+RUN dotnet publish -c Release -o /app/publish --no-restore
 
 # ---------- Stage 2 : Runtime ----------
-FROM runtime-image AS final
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 WORKDIR /app
-COPY --from=build /src/<output> .
-ENTRYPOINT ["<commande de démarrage>"]
+
+# Copie seulement l'application publiée du stage build
+COPY --from=build /app/publish .
+
+EXPOSE 8080
+
+ENTRYPOINT ["dotnet", "HelloMultiStage.dll"]
 ```
 
-> **Point clé** : `COPY --from=build` copie les fichiers depuis le stage nommé `build` vers le stage courant. Le stage `build` (et tout son contenu : SDK, sources, fichiers intermédiaires) n'est pas gardé dans l'image finale.
+### Explication des points clés
 
-### Écosystème d'images .NET
+#### `COPY --from=build`
 
-Microsoft fournit principalement deux images Docker officielles pour les appplications `.NET`. Elles sont hébergées sur le Microsoft Container Registry (`mcr.microsoft.com`) :
+L'instruction `COPY --from=build` permet de copier les fichiers depuis le stage nommé `build` vers le stage courant (`runtime`). Le stage `build` et tout son contenu (SDK, sources, `obj/`, etc.) ne sont pas gardés dans l'iamge finale.
 
-- Image de `build` :
+#### Choix des images de base
+
+- Stage `build` :
   - Image: `mcr.microsoft.com/dotnet/sdk:8.0`
-  - Contenu : SDK complet (.NET CLI + runtime + ASP.NET Core)
-- Image de `run` :
+  - Explication: Contient le CLI `dotnet`, le compilateur et les outils de restore 
+- Stage `runtime` :
   - Image: `mcr.microsoft.com/dotnet/aspnet:8.0`
-  - Contenu : Runtime ASP.NET Core
+  - Contenu : Contient uniquement le runtime ASP.NET Core
 
-## Mise en pratique
+### Comparaison des tailles d'image
 
-### But
-
-Le Dockerfile `Dockerfile.single` build l'application `ASP.NET` Core Web API présente dans cette branche. Adapter le Dockerfile et le rendre multi-stage afin de produire une image de production légère.
-
-### L'application
-
-L'application consiste en une API web minimaliste (ASP.NET Core 8.0) qui expose deux endpoints :
-
-- `GET /` : JSON avec un titre et un message
-- `GET /health` | JSON `{ "status": "up" }`
-
-Commande de lancement locale (nécessite le SDK .NET 8) :
+Build des images :
 
 ```bash
-dotnet restore
-dotnet run
-
-# Tests
-# Sur /
-curl -s http://localhost:5000
-# {"title":"Hello Multi-Stage !","message":"Le endpoint / fonctionne correctement !"}
-# Sur /health
-curl -s http://localhost:5000/health
-# {"status":"up"}
-```
-
-### Étape 1 — Dockerfile single-stage
-
-Utiliser le Dockerfile `Dockerfile.single` pour construire l'image :
-
-```bash
-# Construire l'image single-stage
-docker build -t hello-multistage:single -f Dockerfile.single .
-
-# Vérifier la taille
-docker image ls hello-multistage:single
-```
-
-> 💡 La taille devrait être autour de **~300 MB**.
-
-### Étape 2 — Dockerfile multi-stage
-
-Partir du Dockerfile `Dockerfile.multi` et le modifier pour le transformer en build multi-stage :
-
-1. **Stage `build`** : utiliser `mcr.microsoft.com/dotnet/sdk:8.0` comme image de base, nommé `build`
-
-2. **Stage `runtime`** : utiliser `mcr.microsoft.com/dotnet/aspnet:8.0` comme image de base
-
-Construire l'image et comparer la taille avec l'image générée précédemment.
-
-```bash
-# Construire l'image multi-stage
-docker build -t hello-multistage:multi -f Dockerfile.multi .
-
-# Comparer les tailles
-docker image ls hello-multistage
-```
-
-### Validation
-
-- [ ] `docker build` se termine sans erreur
-- [ ] `docker run -p 8080:8080 hello-multistage:multi` démarre le conteneur
-- [ ] `curl -s http://localhost:8080` retourne le JSON contenant le message, le framework et le timestamp
-- [ ] `curl -s http://localhost:8080/health` retourne le statut healthy
-- [ ] La taille de l'image multi-stage est significativement inférieure à celle du single-stage
-
-### Commandes de build & run
-
-```bash
-# Construire les deux versions pour comparer
 docker build -t hello-multistage:single -f Dockerfile.single .
 docker build -t hello-multistage:multi -f Dockerfile.multi .
-
-# Lancer le conteneur
-docker run -p 8080:8080 hello-multistage:multi
-# En mode detached
-docker run -p 8080:8080 -d hello-multistage:multi
-# En mode detached avec un nom
-docker run -p 8080:8080 -d --name hello-multistage-multi hello-multistage:multi
 ```
 
-Commandes utiles :
+Vérification de la taille des images :
 
 ```bash
-# Comparer les tailles des images
 docker image ls hello-multistage
-
-# Tester l'API
-curl -s http://localhost:8080 | jq
-curl -s http://localhost:8080/health | jq
+# IMAGE                   CONTENT SIZE
+# hello-multistage:multi        88.3MB
+# hello-multistage:single        313MB
 ```
 
-### Bonus
+> L'image multi-stage est environ 3 fois plus petite que l'image single.
 
-- Utiliser une variante Alpine de l'image de runtime (`aspnet:9.0-alpine`) pour réduire encore la taille
-- Ajouter un `HEALTHCHECK` basé sur l'endpoint `/health`
-- Vérifier la gestion build-in des handlers `SIGINT` et `SIGTERM` de `.NET`
+### Bonus : variante Alpine
 
-### Liens utiles
+Pour réduire encore la taille, il est possible de remplacer l'image de runtime par la variante Alpine :
 
-- [Documentation multi-stage builds](https://docs.docker.com/build/building/multi-stage/)
-- [Images .NET sur MCR](https://mcr.microsoft.com/catalog?search=dotnet)
-- [Documentation des commandes de référence](https://docs.docker.com/reference/dockerfile/)
+```dockerfile
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-alpine AS final
+```
+
+Build de l'image :
+
+```bash
+docker build -t hello-multistage:alpine -f Dockerfile.alpine .
+```
+
+La taille de l'image fait environs **~47 MB**.
+
+### Bonus : HEALTHCHECK
+
+Ajouter `HEALTHCHECK` dans le stage `runtime`, avant `ENTRYPOINT` :
+
+```dockerfile
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+```
+
+Build de l'image :
+
+```bash
+docker build -t hello-multistage:health -f Dockerfile.health .
+```
+
+Inspection du health status du conteneur :
+
+```bash
+# Run
+docker run -d -p 8080:8080 --name hello-multistage-health hello-multistage:health
+# Inspect
+docker inspect --format='{{json .State.Health}}' hello-multistage-health | jq
+```
 
 ---
 
@@ -165,4 +123,4 @@ curl -s http://localhost:8080/health | jq
 [📋 Sommaire](../../tree/main) ·
 [03-docker-compose ➡️](../../tree/03-docker-compose)
 
-💡 [Voir la solution](../../tree/02-multi-stage--solution)
+📝 [Retour à l'énoncé](../../tree/02-multi-stage)

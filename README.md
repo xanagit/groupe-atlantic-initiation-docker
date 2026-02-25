@@ -1,132 +1,265 @@
-# Rappels des concepts Docker vu lors du RETEX
+# Dockerisation simple : solution
+
+[⬅️ 00-rappels](../../tree/00-rappels) ·
+[📋 Sommaire](../../tree/main) ·
+[02-multi-stage ➡️](../../tree/02-multi-stage)
+
+📝 [Retour à l'énoncé](../../tree/01-dockerisation-simple)
 
 ---
 
-## Navigation
+## Rappel de l'objectif
 
----
+Conteneuriser l'application Node.js (Express) qui écoute sur le port `3000` et répond `Hello Docker!` sur la route `/`.
 
-⬅️ [00-rappels](../../tree/00-rappels)
+## Solution de base
 
-📋 [Sommaire](../../tree/main)
+### Dockerfile
 
-➡️ [02-multi-stage](../../tree/02-multi-stage)
+```dockerfile
+# 1. Sélectionne l'image de base du Docker Hub
+FROM node:20
 
-💡 [Voir la solution](../../tree/01-dockerisation-simple--solution)
+# 2. Définit le répertoire de travail dans le conteneur
+WORKDIR /app
 
----
+# 3. Copie de tout le répertoire courant dans le dossier /app du conteneur
+COPY . .
 
-## Fonctionnement de Docker
+# 4. Installation des dépandences en utilisant npm ci (utilisation du package-lock)
+RUN npm ci
 
-Docker repose sur une architecture client-serveur :
+# 5. Documente le port d'exposition
+EXPOSE 3000
 
-- **Docker Daemon** (`dockerd`) : gère les objets Docker (images, conteneurs, réseaux, volumes)
-- **Docker Client** (`docker`) : interface CLI qui communique avec le daemon via l'API REST
-- **Registry** : dépôt d'images (Docker Hub, Azure Container Registry, GitHub Container Registry…)
-
-### Concepts clés
-
-- **Image** : template non-modifiable composé de multiples layers empilées
-- **Conteneur** : instance d'exécution d'une image (ajoute une couche R/W éphémère à l'image)
-- **Layer** : certaines instructions (`RUN`, `COPY` / `ADD`) du Dockerfile créent un layer ; les layers sont mis en cache et partagés entre images
-- **Tag** : étiquette versionnée d'une image (`myapp:1.2.0`, `myapp:latest`)
-
-#### Instructions essentielles du Dockerfile
-
-| Instruction    | Rôle                                                |
-| -------------- | --------------------------------------------------- |
-| `FROM`         | Sélectionne l'image de base                         |
-| `WORKDIR`      | Position le répertoire de travail dans le conteneur |
-| `COPY` / `ADD` | Copie les fichiers dans l'image (crée une layer)    |
-| `RUN`          | Exécute une commande (crée une layer)               |
-| `ENV`          | Définit une variable d'environnement                |
-| `ARG`          | Définit un argument de build                        |
-| `EXPOSE`       | Documente le port exposé                            |
-| `ENTRYPOINT`   | Point d'entrée fixe du conteneur                    |
-| `CMD`          | Commande par défaut au démarrage                    |
-
-> **`CMD` vs `ENTRYPOINT`** : `ENTRYPOINT` définit le binaire à exécuter, `CMD` fournit les arguments par défaut.
-
-## Mise en pratique
-
-## But
-
-Conteneuriser l'application Node.js présente dans cette branche afin de la rendre exécutable dans un conteneur Docker.
-
-### Application
-
-L'application consiste en un serveur HTTP simple (Express) qui écoute sur le port `3000`
-et répond `Hello Docker!` sur la route `/`.
-
-Pour la lancer localement (sans Docker) :
-
-```bash
-npm install
-npm run serve / node server.js
+# 6. Défini la commande de démarrage
+CMD ["node", "server.js"]
 ```
 
-## Actions à réaliser
+### `npm ci` vs `npm install`
 
-Créer un fichier `Dockerfile` à la racine du projet qui :
+| Aspect               | `npm install`       | `npm ci`                   |
+|----------------------|---------------------|----------------------------|
+| Fichier de référence | `package.json`      | `package-lock.json`        |
+| Reproductibilité     | ⚠️ Peut varier      | ✅ Identique à chaque fois |
+| Vitesse              | Plus lent           | Plus rapide                |
+| Usage recommandé     | Développement local | CI/CD et Docker            |
 
-1. Utiliser l'image de base node 25 (rechercher sur Docker Hub)
-2. Définir `/app` comme répertoire de travail
-3. Copier les fichiers de dépendances (`package.json`, `package-lock.json`)
-4. Installer les dépendances en utilisant `npm ci` pour se baser exactement sur le fichier `package-lock.json`
-5. Copier le code source
-6. Exposer le port `3000`
-7. Définir la commande de démarrage
+> `npm ci` supprime `node_modules` s'il existe et installe exactement les versions du `package-lock.json`. C'est le choix idéal pour un Dockerfile.
 
-### Validation
+---
 
-- [ ] `docker build` se termine sans erreur
-- [ ] `docker run -p 3000:3000 hello-docker` démarre le conteneur
-- [ ] `curl http://localhost:3000` retourne le json contenant les message hello Docker.
-
-### Commandes de build & run
-
-Commandes de construction et lancement :
+## Build & Run
 
 ```bash
-# Construire l'image
-docker build -t hello-docker .
+# Construction de l'image avec le tag "base"
+docker build -t hello-docker:base -f Dockerfile.base .
 
-# Lancer le conteneur
-docker run -p 3000:3000 hello-docker
-# Lancer le conteneur en mode detached
-docker run -p 3000:3000 -d hello-docker
-# Lancer le conteneur en mode detached en le nommant
-docker run -p 3000:3000 -d --name hello hello-docker
+# Lancement du conteneur en mappant le port 3000
+docker run -p 3000:3000 hello-docker:base
+
+# Test curl
+curl http://localhost:3000
+# → {"message": "Hello Docker!"}
 ```
 
-Autres commandes :
+### Options utiles de `docker run`
 
 ```bash
-# Lister les images
+# Lancement en mode detached (en arrière-plan)
+docker run -p 3000:3000 -d hello-docker:base
+
+# Lancement en mode detached & en le nommant
+docker run -p 3000:3000 -d --name hello-docker-base hello-docker:base
+```
+
+---
+
+## Bonus 1 — Image légère avec Alpine
+
+L'image `node:20` est basée sur Debian et pèse **~415 Mo**. L'image `node:20-alpine` est basée sur Alpine Linux et pèse **~60 Mo**.
+
+```dockerfile
+# Utilise node Alpine pour une taille d'image réduite
+FROM node:20-alpine
+
+WORKDIR /app
+
+COPY . .
+
+RUN npm ci
+
+EXPOSE 3000
+
+CMD ["node", "server.js"]
+```
+
+### Commande de build & run
+
+```bash
+# Build
+docker build -t hello-docker:alpine -f Dockerfile.alpine .
+# Run
+docker run -p 3000:3000 -d hello-docker:alpine
+# Test
+curl http://localhost:3000
+```
+
+### Comparaison des tailles d'image
+
+```bash
 docker image ls
-# Lister les conteneurs
-docker ps
-# Lister tous les conteneurs
-docker ps -a
-# Supprimer un conteneur
-docker rm <ID conteneur>
+# IMAGE               CONTENT SIZE
+# hello-docker:base          402MB
+# hello-docker:alpine       64.7MB
 ```
 
-### Bonus
+## Bonus 2 — HEALTHCHECK
 
-- Utiliser une image plus légère que l'image de base Node.js 25
-- Ajouter un `HEALTHCHECK` dans le Dockerfile pour permettre à Dokcer de vérifier le status et inspecter le health check :
+Le `HEALTHCHECK` permet à Docker de vérifier périodiquement si le conteneur fonctionne correctement.
 
-  ```bash
-  # Vérification du Health State
-  docker inspect <ID conteneur> | jq '.[].State.Health'
-  # Ou
-  docker inspect --format='{{json .State.Health}}' <ID conteneur> | jq
-  ```
+```dockerfile
+# Utilise node Alpine pour une taille d'image réduite
+FROM node:20-alpine
 
-- Supprimer alternativement les interceptions `SIGINT` et `SIGTERM` et étudier la modification du comportement d'arrêt du conteneur
+WORKDIR /app
 
-### Liens utiles
+COPY . .
 
-- [Documentation des commandes de référence](https://docs.docker.com/reference/dockerfile/)
-- [Images Node.js sur Docker Hub](https://hub.docker.com/_/node)
+RUN npm ci
+
+EXPOSE 3000
+
+# Health check: Vérifie que l'application répond sur / (health check)
+# --interval: temps entre les vérifications
+# --timeout: timeout du health check
+# --start-period: délais avant les health check au démarrage
+# --retries: nombre de tentatives avant de marquer le conteneur "unhealthy"
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+   # Non verbeux, unique essai, requête HEAD (--spider), arrête le conteneur en cas d'échec 
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/ || exit 1
+
+CMD ["node", "server.js"]
+```
+
+> Utilisation de `wget` et non `curl` car le binaire existe de base sur Alpine (évite l'installation d'un binaire).
+> `HEALTHCHECK` dans Kubernetes :
+> Dans un environnement Kubernetes, le `HEALTHCHECK` n'est pas utilisé. Kubernetes utilise directement les endpoints de health check de l'application.
+
+### Vérifier le health check
+
+```bash
+# Build
+docker build -t hello-docker:healthcheck -f Dockerfile.healthcheck .
+# Run
+docker run -p 3000:3000 --name hello-docker-healthcheck -d hello-docker:healthcheck
+
+# Inspection du health state (jq)
+docker inspect hello-docker-healthcheck | jq '.[].State.Health'
+
+# Inspection du health state (--format)
+docker inspect --format='{{json .State.Health}}' hello-docker-healthcheck | jq
+```
+
+Résultat de la commande :
+
+```json
+{
+  "Status": "healthy",
+  "FailingStreak": 0,
+  "Log": [
+    {
+      "Start": "2026-02-25T11:37:51.756692353+01:00",
+      "End": "2026-02-25T11:37:51.79867128+01:00",
+      "ExitCode": 0,
+      "Output": "Connecting to localhost:3000 ([::1]:3000)\nremote file exists\n"
+    },
+    {
+      "Start": "2026-02-25T11:38:21.804455575+01:00",
+      "End": "2026-02-25T11:38:21.850594241+01:00",
+      "ExitCode": 0,
+      "Output": "Connecting to localhost:3000 ([::1]:3000)\nremote file exists\n"
+    }
+  ]
+}
+```
+
+> Les états possibles sont : `starting`, `healthy` ou `unhealthy`.
+
+## Bonus 3 — Gestion des signaux (SIGINT / SIGTERM)
+
+### Le problème
+
+Lors de la commande `docker stop <container ID>`, Docker envoie un signal `SIGTERM` au processus du conteneur. Si le processus ne gère pas ce signal, Docker attend 10 secondes puis envoie un `SIGKILL` (arrêt brutal).
+En cas de lancement en mode non detached (sans `-d`) et sans gestion du `SIGINT`, la commande `Ctrl + C` n'arrête pas le conteneur.
+
+### Comportement avec les handlers `SIGTERM` et `SIGINT`
+
+Si l'application intercepte `SIGINT` et `SIGTERM` :
+
+```javascript
+process.on('SIGTERM', () => {
+  console.log('Shutting down...');
+  server.close(() => process.exit(0));
+});
+
+process.on('SIGINT', () => {
+  console.log('Shutting down...');
+  server.close(() => process.exit(0));
+});
+```
+
+Alors, `docker stop` arrête le conteneur immédiatement (arrêt gracieux).
+
+### Comportement sans les handlers
+
+Sans les handlers, `Node.js` ne réagit pas au `SIGTERM` :
+
+`docker stop` attend 10 secondes (timeout Docker par défaut) puis tue le processus avec `SIGKILL`.
+
+```bash
+# Build
+docker build -t hello-docker:nohandlers -f Dockerfile.nohandlers .
+# Run des conteneurs (1 avec les handlers, 1 sans)
+docker run -p 3000:3000 --name hello-docker-with-handlers -d hello-docker:healthcheck
+docker run -p 3001:3000 --name hello-docker-no-handlers -d hello-docker:nohandlers
+
+# Avec handlers : arrêt quasi instantané
+time docker stop hello-docker-with-handlers
+# hello-docker-with-handlers
+# docker stop hello-docker-with-handlers  0,01s user 0,01s system 15% cpu 0,108 total
+
+# Sans handlers : attend le timeout (~10 secondes)
+time docker stop hello-docker-no-handlers
+# hello-docker-no-handlers
+# docker stop hello-docker-no-handlers  0,01s user 0,01s system 0% cpu 10,138 total
+```
+
+> En production (et surtout sur Kubernetes), l'arrêt gracieux est important car il permet de :
+>
+> - Terminer les requêtes HTTP en cours
+> - Fermer proprement les connexions à la base de données
+> - Libérer les ressources
+> - Éviter la perte ou corruption de données
+>
+> La gestion du `SIGTERM` est un prérequis pour un bon fonctionnement sur Kubernetes qui l'utilise notamment pour le rolling update et le scale down.
+
+---
+
+## Récapitulatif des points abordés
+
+| Bonne pratique                       | Pourquoi                               |
+|--------------------------------------|----------------------------------------|
+| Utiliser `npm ci`                    | Builds reproductibles                  |
+| Préférer les images `Alpine`         | Réduction de la taille de l'image      |
+| `HEALTHCHECK`                        | Monitoring intégré du conteneur        |
+| Gestion des signaux                  | Arrêt gracieux, essentiel pour K8s     |
+| `EXPOSE`                             | Documentation du port (bonne pratique) |
+
+---
+
+[⬅️ 00-rappels](../../tree/00-rappels) ·
+[📋 Sommaire](../../tree/main) ·
+[02-multi-stage ➡️](../../tree/02-multi-stage)
+
+📝 [Retour à l'énoncé](../../tree/01-dockerisation-simple)

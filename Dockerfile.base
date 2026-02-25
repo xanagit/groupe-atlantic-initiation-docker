@@ -1,4 +1,6 @@
-# Modifier ce Dockerfile single stage pour le rendre multi-stage
+# Modifier ce Dockerfile en ajoutant :
+# - ARG : DOTNET_VERSION, BUILD_CONFIGURATION
+# - ENV : APP_ENVIRONMENT, APP_TITLE
 
 # ---------- Stage 1 : Build ----------
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
@@ -13,7 +15,7 @@ RUN dotnet restore
 RUN dotnet publish -c Release -o /app/publish --no-restore
 
 # ---------- Stage 2 : Runtime ----------
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-alpine AS runtime
 
 WORKDIR /app
 
@@ -22,4 +24,7 @@ COPY --from=build /app/publish .
 
 EXPOSE 8080
 
-ENTRYPOINT ["dotnet", "HelloMultiStage.dll"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+
+ENTRYPOINT ["dotnet", "HelloEnvArgs.dll"]

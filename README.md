@@ -1,194 +1,230 @@
-# Les instructions `ENV` et `ARG`
+# Les instructions `ENV` et `ARG` : solution
 
 [⬅️ 02-multi-stage](../../tree/02-multi-stage) ·
 [📋 Sommaire](../../tree/main) ·
-[03-docker-compose ➡️](../../tree/04-dockerignore)
+[04-dockerignore ➡️](../../tree/04-dockerignore)
 
-[💡 Voir la solution](../../tree/03-env-args--solution)
+[📝 Retour à l'énoncé](../../tree/03-env-args)
 
 ---
 
-## Pourquoi `ENV` et `ARG` ?
+## Rappel de l'objectif
 
-Un des principes des [12-Factor Apps](https://12factor.net/fr/config) (Build once, deploy everywhere), préconise que la configuration d'une application ne doit pas nécessiter la reconstruction de l'application entière à chaque modification.
+Adapter l'application et le Dockerfile multi-stage pour paramétrer le build via des `ARG` et rendre le comportement configurable au runtime via des `ENV`, en démontrant le principe build once, deploy everywhere.
 
-Pour répondre à cette problématique, `Docker` fournit deux mécanismes complémentaires :
-
-* `ARG` : variable disponible uniquement au moment du build (`docker build`). Elle n'existe plus dans le conteneur au runtime.
-* `ENV` : variable d'environnement disponible au runtime dans le conteneur. Elle peut être lue par l'application.
-
-### Différences clés
-
-| Critère                     | `ARG`                                     | `ENV`                                          |
-| --------------------------- | ----------------------------------------- | ---------------------------------------------- |
-| Disponibilité               | Build-time uniquement                     | Runtime (et build-time)                        |
-| Override                    | `docker build --build-arg`                | `docker run -e`                                |
-| Visible dans l'image finale | ❌ Non                                    | ✅ Oui                                         |
-| Cas d'usage typique         | Version SDK, configuration de compilation | Configuration applicative, URLs, feature flags |
-
-### Syntaxe dans le Dockerfile
-
-```dockerfile
-# ARG avec valeur par défaut
-ARG SDK_VERSION=8.0
-# Utilisation dans FROM
-FROM mcr.microsoft.com/dotnet/sdk:${SDK_VERSION} AS build
-
-# ENV avec valeur par défaut
-ENV APP_ENVIRONMENT=Production
-```
-
-### Override à l'exécution
-
-```bash
-# Override d'un ARG au build
-docker build --build-arg SDK_VERSION=9.0 -t myapp .
-
-# Override d'un ENV au run
-docker run -e APP_ENVIRONMENT=Staging myapp
-```
-
-> **Point clé** : un `ARG` déclaré avant un `FROM` est utilisable dans l'instruction `FROM`, mais pas dans les stages suivants. La disponibilité d'un `ARG` est limitée au stage dans lequel il est déclaré. `Env` a le même comportement même s'il persiste au runtime.
-
-### Le principe Build Once, Deploy Everywhere
-
-L'idée est de construire **une seule image** et de la déployer sur tous les environnements (dev, staging, production) en ne changeant que les variables d'environnement :
-
-* Build Once : `docker build -t myapp .`
-* Deploy everywhere :
-  * dev : `docker run -e APP_ENVIRONMENT=Development myapp`
-  * preprod :  `docker run -e APP_ENVIRONMENT=Preprod myapp`
-  * production : `docker run -e APP_ENVIRONMENT=Production myapp`
-
-## Mise en pratique
-
-### But
-
-Adapter l'application et le Dockerfile multi-stage de l'exercice précédent pour :
-
-1. Paramétrer le build en utilisant des `ARG` (version du SDK/runtime, configuration de build)
-2. Rendre le comportement de l'application configurable au runtime en utilisant `ENV`
-3. Tester le principe `build once, deploy everywhere`
-
-### L'application
-
-L'application reprend l'API web de la partie `02-multi-stage` mais le `Program.cs` doit être modifié pour lire la configuration depuis les variables d'environnement et les exposer dans la réponse JSON du endpoint `/`.
-
-Les variables d'environnement attendues par l'application :
-
-| Variable           | Description                        | Valeur par défaut   |
-| ------------------ | ---------------------------------- | ------------------- |
-| `APP_ENVIRONMENT`  | Nom de l'environnement d'exécution | `Production`        |
-| `APP_TITLE`        | Titre affiché dans la réponse JSON | `Hello ENV & ARG !` |
-
-Le endpoint `/` doit retourner un JSON de la forme :
-
-```json
-{
-  "title": "<valeur de APP_TITLE>",
-  "environment": "<valeur de APP_ENVIRONMENT>",
-  "message": "Le endpoint / fonctionne correctement !"
-}
-```
+## Solution
 
 ### Etape 1 — Paramétrer le build en utilisant des `ARG`
 
-Utiliser le Dockerfile `Dockerfile.base` et ajouter des `ARG` pour le paramétrer :
+```dockerfile
+# -- ARG déclaré avant FROM
+ARG DOTNET_VERSION=8.0
 
-1. **`DOTNET_VERSION`** : version du SDK et du runtime .NET (valeur par défaut : `8.0`)
-2. **`BUILD_CONFIGURATION`** : configuration de compilation `Release` ou `Debug` (valeur par défaut : `Release`)
+# ---------- Stage 1 : Build ----------
+FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_VERSION} AS build
 
-> L'argument `DOTNET_VERSION` doit être déclaré avant le premier `FROM` pour être utilisable par l'instruction `FROM`.
+# Déclaration après le FROM pour utilisation dans le stage
+ARG BUILD_CONFIGURATION=Release
+
+WORKDIR /src
+
+...
+
+# Publish en utilisant BUILD_CONFIGURATION
+RUN dotnet publish --configuration ${BUILD_CONFIGURATION} -o /app/publish --no-restore
+
+# ---------- Stage 2 : Runtime ----------
+FROM mcr.microsoft.com/dotnet/aspnet:${DOTNET_VERSION} AS runtime
+
+...
+```
+
+> `DOTNET_VERSION` est déclaré avant le premier `FROM` : il est disponible dans les instructions `FROM` elles-mêmes mais pas dans les instructions du stage sauf s'il est re-déclaré à l'intérieur du stage.
+>
+> `BUILD_CONFIGURATION` déclaré après un `FROM` : il est disponible uniquement dans ce stage et n'est pas conservé dans l'image finale.
 
 ### Etape 2 — Rendre le comportement de l'application configurable au runtime en utilisant `ENV`
 
 #### Modifier le `Program.cs`
 
-Modifier `Program.cs` pour qu'il lise les variables d'environnement `APP_ENVIRONMENT` et `APP_TITLE` et les retourne dans la réponse JSON du endpoint `/`.
+```csharp
+...
 
-> Utiliser `Environment.GetEnvironmentVariable("MA_VARIABLE")` pour lire les varaibles d'environnement depuis le code.
-> Utiliser l'opérateur `??` pour définir une valeur par défaut : `Environment.GetEnvironmentVariable("MA_VARIABLE") ?? "valeur par défaut"`.
+var appEnvironment = Environment.GetEnvironmentVariable("APP_ENVIRONMENT") ?? "Production";
+var appTitle = Environment.GetEnvironmentVariable("APP_TITLE") ?? "Hello ENV & ARG !";
+
+app.MapGet("/", () => Results.Json(...));
+
+...
+```
 
 #### Ajouter les `ENV` dans le Dockerfile
 
-Ajouter dans le stage `runtime` les variables d'environnement avec des valeurs par défaut :
+```dockerfile
+...
 
-* `APP_ENVIRONMENT` = `Production`
-* `APP_TITLE` = `Hello ENV & ARG !`
+# ---------- Stage 2 : Runtime ----------
+FROM mcr.microsoft.com/dotnet/aspnet:${DOTNET_VERSION} AS runtime
+
+# Variables d'environnement avec leur valeur par défaut
+ENV APP_ENVIRONMENT=Production
+ENV APP_TITLE="Hello ENV & ARG !"
+
+...
+```
+
+`APP_ENVIRONMENT` et `APP_TITLE` sont :
+
+* Persistées dans l'image
+* Disponibles au runtime (lecture via `Environment.GetEnvironmentVariable()`)
+* Surchargeables sans reconstruire l'image (`docker run -e`)
 
 ### Etape 3 - Tester le principe `build once, deploy everywhere`
 
-Lancer l'application pluiseurs fois en modifiant successivment les variables d'environnement et en testant la modifciation du comportement de l'applicaiton :
+#### Build once
 
-* 1er run : valeurs par défaut
-* 2e run :
-  * `APP_ENVIRONMENT` = `Dev`
-* 3e run :
-  * `APP_ENVIRONMENT` = `Preprod`
-  * `APP_TITLE` = `API de preprod`
-
-### Validation
-
-* [ ] `docker build` se termine sans erreur
-* [ ] `docker run -p 8080:8080 hello-env-arg` démarre le conteneur
-* [ ] `curl -s http://localhost:8080` retourne le JSON avec l'environnement `Production` et le titre `Hello ENV & ARG !`
-* [ ] `docker run -p 8080:8080 -e APP_ENVIRONMENT=Preprod -e APP_TITLE="API de preprod"` retourne le JSON avec `Preprod` et `API de preprod`
-* [ ] `docker build --build-arg BUILD_CONFIGURATION=Debug` produit un build en mode Debug
-
-### Commandes de build & run
+Build simple :
 
 ```bash
-# Construire l'image avec les valeurs par défaut
-docker build -t hello-env-arg:base -f Dockerfile.base .
-
-# Lancer avec les valeurs par défaut
-docker run -p 8080:8080 hello-env-arg:base
-
-# Tester
-curl -s http://localhost:8080 | jq
-# { "title": "Hello ENV & ARG !", "environment": "Production", "message": "..." }
+# Build unique de l'image
+docker build -t hello-env-args:base -f Dockerfile.base .
 ```
 
-Surcharge de `ENV` au runtime :
+Surcharge des `ARG` au build :
 
 ```bash
-# Simuler un déploiement en Preprod
-docker run -p 8080:8080 \
+# Builder avec .NET 9.0 (modification de TargetFramework dans le csproj nécessaire)
+docker build --build-arg DOTNET_VERSION=9.0 -t hello-env-args:net9 -f Dockerfile.net9 .
+
+# Builder en mode Debug
+docker build --build-arg BUILD_CONFIGURATION=Debug -t hello-env-args:debug -f Dockerfile.base .
+
+# Combiner les deux
+docker build \
+  --build-arg DOTNET_VERSION=9.0 \
+  --build-arg BUILD_CONFIGURATION=Debug \
+  -t hello-env-args:net9-debug \
+  -f Dockerfile.net9 .
+```
+
+#### Deploy everywhere
+
+##### 1er run : valeurs par défaut
+
+```bash
+# Run
+docker run -d -p 8080:8080 hello-env-args:base
+
+# Test
+curl -s http://localhost:8080
+# {"title":"Hello ENV & ARG !","environment":"Production","message":"Le endpoint / fonctionne correctement !"}
+```
+
+##### 2e run : `APP_ENVIRONMENT`=`Dev`
+
+```bash
+# Run
+docker run -d -p 8080:8080 \
+  -e APP_ENVIRONMENT=Dev \
+  hello-env-args:base
+
+# Test
+curl -s http://localhost:8080
+# {"title":"Hello ENV & ARG !","environment":"Dev","message":"Le endpoint / fonctionne correctement !"}
+```
+
+##### 3e run : `APP_ENVIRONMENT`=`Preprod` & `APP_TITLE`=`API de preprod`
+
+```bash
+# Run
+docker run -d -p 8080:8080 \
   -e APP_ENVIRONMENT=Preprod \
   -e APP_TITLE="API de preprod" \
-  hello-env-arg:base
+  hello-env-args:base
 
-curl -s http://localhost:8080 | jq
-# { "title": "API de preprod", "environment": "Preprod", "message": "..." }
+# Test
+curl -s http://localhost:8080
+# {"title":"API de preprod","environment":"Preprod","message":"Le endpoint / fonctionne correctement !"}
 ```
 
-Surcharge de `ARG` au build :
+### Bonus : Inspecter le conteneur
+
+La commande `docker inspect` retourne l'ensemble des métadata d'un conteneur ou d'une image au format JSON.
+Les variables d'environnement se trouvent dans le chemin `.[].Config.Env` :
 
 ```bash
-# Builder en mode Debug
-docker build --build-arg BUILD_CONFIGURATION=Debug -t hello-env-arg:debug -f Dockerfile.base .
-
-# Builder avec une autre version de .NET
-docker build --build-arg DOTNET_VERSION=9.0 -t hello-env-arg:net9 -f Dockerfile.base .
+# Inspecter l'image
+docker inspect hello-env-args:base | jq '.[].Config.Env'
+# [
+#   "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+#   "ASPNETCORE_HTTP_PORTS=8080",
+#   "DOTNET_RUNNING_IN_CONTAINER=true",
+#   "APP_ENVIRONMENT=Production",
+#   "APP_TITLE=Hello ENV & ARG !"
+# ]
 ```
 
-### Bonus
+### Bonus : écoute sur les ports `8080` et `5050`
 
-* L'application est exposée sur le port `8080` par défaut. Trouver la variable d'environnement utilisée et la surcharger pour permettre l'écoute sur le port `8080` et `5000`
-* Essayer d'utiliser un `ARG` au runtime (par exemple afficher `BUILD_CONFIGURATION` dans la réponse JSON) et observer le comportement du conteneur
-* Inspecter le conteneur via `docker inspect` et trouver le chemin JSON d'accès aux variables d'environnement définies dans l'image
+L'image `mcr.microsoft.com/dotnet/aspnet:8.0` spécifie la variable d'environnement `ASPNETCORE_HTTP_PORTS` pour configurer le port d'écoute.
+Pour vérifier la valeur par défaut, il est possible de vérifier `.[].Config.Env` lors d'un inspect de l'image :
 
-### Liens utiles
+```bash
+docker inspect hello-env-args:base | jq '.[].Config.Env'
+# [
+#   "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+#   "ASPNETCORE_HTTP_PORTS=8080",
+#   "DOTNET_RUNNING_IN_CONTAINER=true",
+#   "APP_ENVIRONMENT=Production",
+#   "APP_TITLE=Hello ENV & ARG !"
+# ]
+```
 
-* [Documentation ARG](https://docs.docker.com/reference/dockerfile/#arg)
-* [Documentation ENV](https://docs.docker.com/reference/dockerfile/#env)
-* [12-Factor App : Configuration](https://12factor.net/fr/config)
-* [Documentation des commandes de référence](https://docs.docker.com/reference/dockerfile/)
+La surcharge se fait comme pour un `ENV` défini dans le Dockerfile. Pour spécifier de multiples ports, il faut les séparer par des `;` :
+
+```bash
+# Le port 5000 est utilisé par Airdrop sur Mac s'il est activé (utiliser un autre port)
+# Vérifier si le port est déjà en cours d'utilisation
+lsof -i :5000
+# COMMAND   PID   USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+# ControlCe 721 damien   11u  IPv4 0x9720fb58a1cf0096      0t0  TCP *:commplex-main (LISTEN)
+# ControlCe 721 damien   12u  IPv6 0x35a0aa967c2386c6      0t0  TCP *:commplex-main (LISTEN)
+# Démarrage en surchargent ASPNETCORE_HTTP_PORTS et mappant les ports (port 5050 ou 5000 s'il est disponible)
+docker run -d -p 5050:5000 -p 8080:8080 -e ASPNETCORE_HTTP_PORTS="8080;5000" hello-env-args:base
+
+# Test sur le port 8080
+curl -s http://localhost:8080
+# {"title": "Hello ENV & ARG !", "environment": "Production", "message": "Le endpoint / fonctionne correctement !"}
+
+# Test sur le port 5000
+curl -s http://localhost:5000
+# {"title": "Hello ENV & ARG !", "environment": "Production", "message": "Le endpoint / fonctionne correctement !"}
+```
+
+### Bonus : `ARG` au runtime
+
+Si on essaie de lire un `ARG` au runtime , on récupérera une valeur nulle car ARG n'existe qu'au moment du build :
+
+```csharp
+// buildConfig = null car l'ARG BUILD_CONFIGURATION n'existe pas au runtime
+var buildConfig = Environment.GetEnvironmentVariable("BUILD_CONFIGURATION");
+```
+
+## Récapitulatif des points abordés
+
+| Bonne pratique                   | Pourquoi                                                             |
+| -------------------------------- | -------------------------------------------------------------------- |
+| `ARG` pour le build              | Paramétrer les versions et la compilation sans changer le Dockerfile |
+| `ENV` pour le runtime            | Configurer l'application sans reconstruire l'image                   |
+| `ARG` avant `FROM`               | Permet de paramétrer l'image de base                                 |
+| Build Once, Deploy Everywhere    | Une seule image pour tous les environnements                         |
+| Ne pas hardcoder la config       | Principe 12-Factor : la config vient de l'environnement pas du build |
+| `docker inspect` pour les `ENV`  | Vérifier les variables présentes dans l'image                        |
 
 ---
 
 [⬅️ 02-multi-stage](../../tree/02-multi-stage) ·
 [📋 Sommaire](../../tree/main) ·
-[03-docker-compose ➡️](../../tree/04-dockerignore)
+[04-dockerignore ➡️](../../tree/04-dockerignore)
 
-[💡 Voir la solution](../../tree/03-env-args--solution)
+[📝 Retour à l'énoncé](../../tree/03-env-args)

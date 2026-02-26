@@ -8,6 +8,7 @@ ARG DOTNET_VERSION=8.0
 # ---------- Stage 1 : Build ----------
 FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_VERSION} AS build
 
+ARG DOTNET_VERSION
 # Déclaration après le FROM pour utilisation dans le stage
 ARG BUILD_CONFIGURATION=Release
 
@@ -15,6 +16,18 @@ WORKDIR /src
 
 # Copie du csproj et du code
 COPY . .
+
+RUN cat > HelloEnvArgs.csproj <<EOF
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net${DOTNET_VERSION}</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+</Project>
+EOF
 
 RUN dotnet restore
 

@@ -1,0 +1,23 @@
+ARG DOTNET_VERSION=8.0
+
+# 1 seul stage (nécessaire pour le debug)
+FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_VERSION}
+
+# Installation de vsdbg (debugger VS Code .NET)
+RUN apt-get update && apt-get install -y curl unzip \
+    && curl -sSL https://aka.ms/getvsdbgsh | bash /dev/stdin -v latest -l /vsdbg \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . .
+
+RUN dotnet restore
+
+ENV FRONT_ORIGIN="http://localhost:3000"
+ENV APP_ENVIRONMENT=Debug
+ENV APP_TITLE="Hello Debug !"
+
+EXPOSE 8080
+
+# Build and run in Debug configuration
+CMD ["dotnet", "run", "--configuration", "Debug", "--urls", "http://0.0.0.0:8080"]

@@ -1,0 +1,24 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Attach to Docker",
+            "type": "coreclr",
+            "request": "attach",
+            "processName": "HelloDockerignore",
+            "pipeTransport": {
+                "pipeProgram": "docker",
+                "pipeArgs": ["exec", "-i", "hello-debug"],
+                "debuggerPath": "/vsdbg/debug-shim.sh",
+                "pipeCwd": "${workspaceFolder}"
+            },
+            "sourceFileMap": {
+                "/app": "${workspaceFolder}"
+            },
+            "logging": {
+                "engineLogging": true,
+                "programOutput": true
+            }
+        }
+    ]
+}

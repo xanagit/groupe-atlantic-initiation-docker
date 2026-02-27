@@ -1,0 +1,19 @@
+# Dossiers liés au build local
+build/
+node_modules/
+
+# Fichiers VCS (git)
+.git/
+.gitignore
+
+# Fichiers Docker
+Dockerfile*
+*.dockerignore
+
+# Fichiers sensibles
+*.key
+*.pem
+
+# Documentation
+images/
+README.md

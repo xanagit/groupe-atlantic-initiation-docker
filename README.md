@@ -1,227 +1,248 @@
-# Les instructions `ENV` et `ARG` : solution
+# Les fichiers `.dockerignore` et `Dockerfile.dockerignore`
 
-[⬅️ 02-multi-stage](../../tree/02-multi-stage) ·
+[⬅️ 03-env-args](../../tree/03-env-args) ·
 [📋 Sommaire](../../tree/main) ·
-[04-dockerignore ➡️](../../tree/04-dockerignore)
+[05-troubleshooting ➡️](../../tree/05-troubleshooting)
 
-[📝 Retour à l'énoncé](../../tree/03-env-args)
+💡 [Voir la solution](../../tree/04-dockerignore--solution)
 
 ---
 
-## Rappel de l'objectif
+## Utilité du `.dockerignore` ?
 
-Adapter l'application et le Dockerfile multi-stage pour paramétrer le build via des `ARG` et rendre le comportement configurable au runtime via des `ENV`, en démontrant le principe build once, deploy everywhere.
+Lorsqu'on exécute `docker build`, les commandes `COPY` envoient l'intégralité du répertoire courant passé en argument : les sources, les binaires compilés, le répertoire `.git/`, les fichiers de configuration locaux, les secrets, etc.
 
-## Solution
+Cela pose plusieurs problèmes :
 
-### Etape 1 — Paramétrer le build en utilisant des `ARG`
+* Fichiers inutiles copiés : build plus lent
+* Invalidation du cache : un changement dans un fichier non pertinent (ex: `.git/`) invalide le cache de `COPY` et déclenche un rebuild complet
+* Sécurité : des fichiers sensibles (`.env` ou secrets) peuvent se retrouver dans l'image
+* Taille de l'image : des fichiers non nécessaires alourdissent l'image finale
 
-```dockerfile
-# -- ARG déclaré avant FROM
-ARG DOTNET_VERSION=8.0
+### Fonctionnement du fichier `.dockerignore`
 
-# ---------- Stage 1 : Build ----------
-FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_VERSION} AS build
+Le fichier `.dockerignore` fonctionne comme un `.gitignore` : il indique à Docker les fichiers et répertoires à exclure du contexte du build.
 
-# Déclaration après le FROM pour utilisation dans le stage
-ARG BUILD_CONFIGURATION=Release
+Exemple de fichier `.dockerignore` :
 
-WORKDIR /src
+```Dockerfile
+# Fichiers de compilation .NET
+bin/
+obj/
 
-...
+# Répertoire Git
+.git/
+.gitignore
 
-# Publish en utilisant BUILD_CONFIGURATION
-RUN dotnet publish --configuration ${BUILD_CONFIGURATION} -o /app/publish --no-restore
+# Fichiers IDE
+.vs/
+.vscode/
+*.sln
+*.user
 
-# ---------- Stage 2 : Runtime ----------
-FROM mcr.microsoft.com/dotnet/aspnet:${DOTNET_VERSION} AS runtime
+# Fichiers Docker
+Dockerfile*
+docker-compose*
 
-...
+# Fichiers sensibles
+.env
+*.key
+*.pem
 ```
 
-> `DOTNET_VERSION` est déclaré avant le premier `FROM` : il est disponible dans les instructions `FROM` elles-mêmes mais pas dans les instructions du stage sauf s'il est re-déclaré à l'intérieur du stage.
->
-> `BUILD_CONFIGURATION` déclaré après un `FROM` : il est disponible uniquement dans ce stage et n'est pas conservé dans l'image finale.
+> Le fichier `.dockerignore` est lu avant l'exécution du build : les fichiers exclus ne sont jamais envoyés dans l'image pour améliorer la performance et la sécurité.
 
-### Etape 2 — Rendre le comportement de l'application configurable au runtime en utilisant `ENV`
+### Le fichier `Dockerfile.dockerignore`
 
-#### Modifier le `Program.cs`
+Depuis `Docker BuildKit` (nouveau moteur de build Docker utilisé par défaut depuis `Docker 23`), il est possible de créer un fichier `.dockerignore` spécifique à un Dockerfile. La convention de nommage est `<nom-du-dockerfile>.dockerignore`.
 
-```csharp
-...
-
-var appEnvironment = Environment.GetEnvironmentVariable("APP_ENVIRONMENT") ?? "Production";
-var appTitle = Environment.GetEnvironmentVariable("APP_TITLE") ?? "Hello ENV & ARG !";
-
-app.MapGet("/", () => Results.Json(...));
-
-...
-```
-
-#### Ajouter les `ENV` dans le Dockerfile
-
-```dockerfile
-...
-
-# ---------- Stage 2 : Runtime ----------
-FROM mcr.microsoft.com/dotnet/aspnet:${DOTNET_VERSION} AS runtime
-
-# Variables d'environnements avec leur valeur par défaut
-ENV APP_ENVIRONMENT=Production
-ENV APP_TITLE="Hello ENV & ARG !"
-
-...
-```
-
-`APP_ENVIRONMENT` et `APP_TITLE` sont :
-
-* Persistées dans l'image
-* Disponibles au runtime (lecture via `Environment.GetEnvironmentVariable()`)
-* Surchargeables sans reconstruire l'image (`docker run -e`)
-
-### Etape 3 - Tester le principe `build once, deploy everywhere`
-
-#### Build once
-
-Build simple :
+Par exemple :
 
 ```bash
-# Build unique de l'image
-docker build -t hello-env-args:base -f Dockerfile.base .
+.
+├── Dockerfile.dev
+├── Dockerfile.dev.dockerignore  # fichiers ignorés par le build de Dockerfile.dev
+├── Dockerfile.prod
+├── Dockerfile.prod.dockerignore # fichiers ignorés par le build de Dockerfile.prod
+├── Dockerfile.preprod
+└── .dockerignore # Utilisé lors du build de Dockerfile.preprod 
+                  # car il n'a pas de .dockerignore dédié
 ```
 
-Surcharge des `ARG` au build :
+C'est utile quand on a plusieurs Dockerfiles dans le même répertoire avec des besoins différents :
+
+* Un Dockerfile de dev qui a besoin des fichiers de test et de config locale
+* Un Dockerfile de prod qui doit exclure tout ce qui n'est pas nécessaire au runtime
+* Peut aussi être utile dans un mono-repo : chaque application a son `Dockerfile` dédié
+
+> Si un fichier `Dockerfile.prod.dockerignore` existe, il est utilisé en remplacement de `.dockerignore` (pas en complément). Toutes les exclusions nécessaires au build `Dockerfile.prod` doivent être définies dans `Dockerfile.prod.dockerignore`.
+
+## Mise en pratique
+
+### But
+
+Ajouter les fichiers `.dockerignore` et `Dockerfile.dockerignore` sur le projet de l'exercice précédent pour :
+
+1. Observer la taille des images sans `.dockerignore`
+2. Créer les `.dockerignore`
+3. Créer un `.dockerignore` spécifique à un Dockerfile
+
+### L'application
+
+L'application comprend un backend en `C#` et un frontend en `React.js`. La variable d'environnement `FRONT_ORIGIN` a été ajoutée au build du backend pour configurer les `CORS`.
+Le front contient un script de démarrage qui injecte la variable d'environnement `BACKEND_URL` dans le front au démarrage.
+
+### Préparation — Simuler des fichiers à exclure
+
+Avant de commencer, créer quelques fichiers et répertoires qui simulent un projet réel :
 
 ```bash
-# Builder avec .NET 9.0 (modification de TargetFramework dans le csproj nécessaire)
-docker build --build-arg DOTNET_VERSION=9.0 -t hello-env-args:net9 -f Dockerfile.net9 .
-
-# Builder en mode Debug
-docker build --build-arg BUILD_CONFIGURATION=Debug -t hello-env-args:debug -f Dockerfile.base .
-
-# Combiner les deux
-docker build \
-  --build-arg DOTNET_VERSION=9.0 \
-  --build-arg BUILD_CONFIGURATION=Debug \
-  -t hello-env-args:net9-debug \
-  -f Dockerfile.net9 .
+# Lancer les commandes de récupération des dépendances et de build
+# Backend
+cd backend
+dotnet restore
+dotnet publish --configuration Release -o publish
+# frontend
+cd ../frontend
+npm install
+npm run build
 ```
 
-#### Deploy everywhere
+### Étape 1 — Observer la taille des images sans `.dockerignore`
 
-##### 1er run : valeurs par défaut
+Construire les images des projets backend et frontend sans `.dockerignore` :
 
 ```bash
-# Run
-docker run -d -p 8080:8080 hello-env-args:base
-
-# Test
-curl -s http://localhost:8080
-# {"title":"Hello ENV & ARG !","environment":"Production","message":"Le endpoint / fonctionne correctement !"}
+# Build du frontend
+cd frontend
+docker build -t hello-dockerignore-front:noignore -f Dockerfile.front .
+# Build du backend
+cd ../backend
+docker build -t hello-dockerignore-back:noignore -f Dockerfile.back .
 ```
 
-##### 2e run : `APP_ENVIRONMENT`=`Dev`
+Lancer les conteneurs :
 
 ```bash
-# Run
-docker run -d -p 8080:8080 \
-  -e APP_ENVIRONMENT=Dev \
-  hello-env-args:base
-
-# Test
-curl -s http://localhost:8080
-# {"title":"Hello ENV & ARG !","environment":"Dev","message":"Le endpoint / fonctionne correctement !"}
+docker run -d -p 3000:3000 hello-dockerignore-front:noignore
+docker run -d -p 8080:8080 hello-dockerignore-back:noignore
 ```
 
-##### 3e run : `APP_ENVIRONMENT`=`Preprod` & `APP_TITLE`=`API de preprod`
+Lancer l'application dans un navigateur : [Front](http://localhost:3000)
+
+Vérifier la taille des images finales :
 
 ```bash
-# Run
-docker run -d -p 8080:8080 \
-  -e APP_ENVIRONMENT=Preprod \
-  -e APP_TITLE="API de preprod" \
-  hello-env-args:base
-
-# Test
-curl -s http://localhost:8080
-# {"title":"API de preprod","environment":"Preprod","message":"Le endpoint / fonctionne correctement !"}
+docker image ls hello-dockerignore-front
+docker image ls hello-dockerignore-back
 ```
 
-### Bonus : Inspecter le conteneur
-
-La commande `docker inspect` retourne l'ensemble des métadata d'un conteneur ou d'une image au format JSON.
-Les variables d'environnement se trouvent dans le chemin `.[].Config.Env` :
+Vérifier les fichiers présents dans l'image du frontend et la taille du répertoire `/app` :
 
 ```bash
-# Inspecter l'image
-docker inspect hello-env-args:base | jq '.[].Config.Env'
-# [
-#   "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-#   "ASPNETCORE_HTTP_PORTS=8080",
-#   "DOTNET_RUNNING_IN_CONTAINER=true",
-#   "APP_ENVIRONMENT=Production",
-#   "APP_TITLE=Hello ENV & ARG !"
-# ]
+# Lister tous les fichiers
+docker run --rm -it hello-dockerignore-front:noignore ls -la /app
+# Afficher la taille occupée
+docker run --rm -it hello-dockerignore-front:noignore du -skh /app
 ```
 
-### Bonus : écoute sur les ports `8080` et `5000`
+> Le build du backend est structuré en multi-stage build : la taille du stage de build sera volumineuse
+> mais la taille de l'image finale sera réduite car le stage runtime n'embarque que le répertoire `publish` du tag `build`.
 
-L'image `mcr.microsoft.com/dotnet/aspnet:8.0` spécifie la variable d'environnement `ASPNETCORE_HTTP_PORTS` pour configurer le port d'écoute.
-Pour vérifier la valeur par défaut, il est possible de vérifier `.[].Config.Env` lors d'un inspect de l'image :
+### Étape 2 — Créer les `.dockerignore`
+
+Créer un fichier `.dockerignore` à la racine de chaque projet (backend et frontend) qui exclut :
+
+1. Les répertoires de compilation `C#` (`bin/`, `obj/`) ou node (`node_modules`)
+2. Le répertoire Git (`.git/`, `.gitignore`)
+3. Les fichiers Docker (`Dockerfile*`)
+4. Les fichiers sensibles (`.env`, `*.pem`)
+5. La documentation (`docs/`, `README.md`)
+
+Reconstruire les images et comparer les tailles d'image avec et sans `.dockerignore` :
 
 ```bash
-docker inspect hello-env-args:base | jq '.[].Config.Env'
-# [
-#   "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-#   "ASPNETCORE_HTTP_PORTS=8080",
-#   "DOTNET_RUNNING_IN_CONTAINER=true",
-#   "APP_ENVIRONMENT=Production",
-#   "APP_TITLE=Hello ENV & ARG !"
-# ]
+docker build -t hello-dockerignore-front:ignore -f Dockerfile.front .
+docker build -t hello-dockerignore-back:ignore -f Dockerfile.back .
 ```
 
-La surcharge se fait comme pour un `ENV` défini dans le Dockerfile. Pour spécifier de multiples ports, il faut les séparer par des `;` :
+Comparer la taille des images :
 
 ```bash
-# Le port 5000 est utilisé par Airdrop sur Mac s'il est activé (utiliser un autre port)
-# Vérifier si le port est déjà en cours d'utilisation
-lsof -i :5000
-# Démarrage en surchargent ASPNETCORE_HTTP_PORTS et mappant les ports
-docker run -d -p 5050:5000 -p 8080:8080 -e ASPNETCORE_HTTP_PORTS="8080;5000" hello-env-args:base
-
-# Test sur le port 8080
-curl -s http://localhost:8080
-# {"title": "Hello ENV & ARG !", "environment": "Production", "message": "Le endpoint / fonctionne correctement !"}
-
-# Test sur le port 5000
-curl -s http://localhost:5000
-# {"title": "Hello ENV & ARG !", "environment": "Production", "message": "Le endpoint / fonctionne correctement !"}
+docker image ls hello-dockerignore-front
+docker image ls hello-dockerignore-back
 ```
 
-### Bonus : `ARG` au runtime
+Vérifier que seulement les fichiers nécessaires au runtime sont dans l'image du frontend :
 
-Si on essaie de lire un `ARG` au runtime , on récupérera une valeur nulle car ARG n'existe qu'au moment du build :
-
-```csharp
-// buildConfig = null car l'ARG BUILD_CONFIGURATION n'existe pas au runtime
-var buildConfig = Environment.GetEnvironmentVariable("BUILD_CONFIGURATION");
+```bash
+docker run --rm -it hello-dockerignore-front:ignore ls -la /app
 ```
 
-## Récapitulatif des points abordés
+### Étape 3 — Créer un `Dockerfile.dockerignore` spécifique
 
-| Bonne pratique                   | Pourquoi                                                             |
-| -------------------------------- | -------------------------------------------------------------------- |
-| `ARG` pour le build              | Paramétrer les versions et la compilation sans changer le Dockerfile |
-| `ENV` pour le runtime            | Configurer l'application sans reconstruire l'image                   |
-| `ARG` avant `FROM`               | Permet de paramétrer l'image de base                                 |
-| Build Once, Deploy Everywhere    | Une seule image pour tous les environnements                         |
-| Ne pas hardcoder la config       | Principe 12-Factor : la config vient de l'environnement pas du build |
-| `docker inspect` pour les `ENV`  | Vérifier les variables présentes dans l'image                        |
+Dans le backend, créer un fichier `Dockerfile.debug.dockerignore` qui :
+
+* Reprend les mêmes exclusions que le `.dockerignore`
+* Mais autoriser le répertoire `.vscode` nécessaire pour le debug
+
+Construire l'image et vérifier que `.vscode` est présent :
+
+```bash
+cd backend
+# Build de l'image debug
+docker build -t hello-dockerignore:debug -f Dockerfile.debug .
+# Run de l'image debug
+docker run --rm -it hello-dockerignore:debug ls -la /app/.vscode
+```
+
+### Validation
+
+* [ ] L'image du frontend est significativement plus petite avec le `.dockerignore`
+* [ ] Les fichiers sensibles (`.env`, `key.pem`) ne sont pas présents dans l'image du frontend
+* [ ] Le `Dockerfile.debug.dockerignore` permet d'inclure `.vscode/` uniquement pour le build debug
+* [ ] Les fichiers de compilation (`bin`, `obj`) ne sont pas dans l'image
+
+### Commandes de build & run
+
+```bash
+# Build sans .dockerignore
+docker build -t hello-dockerignore-front:noignore -f Dockerfile.front .
+docker build -t hello-dockerignore-back:noignore -f Dockerfile.back .
+
+# Build avec .dockerignore
+docker build -t hello-dockerignore-front:ignore -f Dockerfile.front .
+docker build -t hello-dockerignore-back:ignore -f Dockerfile.back .
+
+# Build avec le Dockerfile.debug.dockerignore spécifique
+docker build -t hello-dockerignore-back:debug -f Dockerfile.debug .
+
+# Vérifier la taille des images
+docker image ls hello-dockerignore-front
+docker image ls hello-dockerignore-back
+
+# Vérifier les fichiers présents dans l'image
+docker run --rm hello-dockerignore-front:noignore ls -la /app/
+docker run --rm hello-dockerignore-front:ignore ls -la /app/
+docker run --rm hello-dockerignore:debug ls -la /app/.vscode/
+```
+
+### Bonus
+
+* Mesurer la différence de temps de build avec et sans `.dockerignore` en utilisant `time docker build ...`
+* Utiliser `docker image history` pour analyser les layers et leur taille
+* Tester l'impact du `.dockerignore` sur l'invalidation du cache : modifier un fichier exclu (ex: `README.md`) et vérifier que le cache n'est pas invalidé
+
+### Liens utiles
+
+* [Documentation .dockerignore](https://docs.docker.com/build/concepts/context/#dockerignore-files)
+* [Documentation BuildKit](https://docs.docker.com/build/buildkit/)
+* [Documentation des commandes de référence](https://docs.docker.com/reference/dockerfile/)
 
 ---
 
-[⬅️ 02-multi-stage](../../tree/02-multi-stage) ·
+[⬅️ 03-env-args](../../tree/03-env-args) ·
 [📋 Sommaire](../../tree/main) ·
-[04-dockerignore ➡️](../../tree/04-dockerignore)
+[05-troubleshooting ➡️](../../tree/05-troubleshooting)
 
-[📝 Retour à l'énoncé](../../tree/03-env-args)
+💡 [Voir la solution](../../tree/04-dockerignore--solution)

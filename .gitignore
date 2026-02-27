@@ -1,2 +1,5 @@
 obj
 bin
+node_modules
+publish
+build

@@ -1,0 +1,16 @@
+# Dossiers liés au build local
+bin/
+obj/
+publish/
+
+# Fichiers VCS (git)
+.git/
+.gitignore
+
+# Fichiers Docker
+Dockerfile.back
+*.dockerignore
+
+# Documentation
+images/
+README.md

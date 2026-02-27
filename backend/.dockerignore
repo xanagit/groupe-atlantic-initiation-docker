@@ -1,0 +1,19 @@
+# Lié au build local
+bin/
+obj/
+publish/
+
+# Fichiers VCS (git)
+.git/
+.gitignore
+
+# Fichiers Docker
+Dockerfile*
+*.dockerignore
+
+# Documentation
+images/
+README.md
+
+# Fichier VS Code
+.vscode

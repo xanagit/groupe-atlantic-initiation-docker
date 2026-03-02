@@ -1,362 +1,280 @@
-# Les fichiers `.dockerignore` et `Dockerfile.dockerignore` : solution
+# Troubleshooting Docker
 
-[⬅️ 03-env-args](../../tree/03-env-args) ·
+[⬅️ 04-dockerignore](../../tree/04-dockerignore) ·
 [📋 Sommaire](../../tree/main) ·
-[05-troubleshooting ➡️](../../tree/05-troubleshooting)
+[06-securite-non-root ➡️](../../tree/06-securite-non-root)
 
-[📝 Retour à l'énoncé](../../tree/04-dockerignore)
+💡 [Voir la solution](../../tree/05-troubleshooting--solution)
 
 ---
 
-## Rappel de l'objectif
+## Contexte
 
-Mettre en place les fichiers `.dockerignore` et `Dockerfile.dockerignore` pour réduire le build context, protéger les fichiers sensibles et gérer les exclusions par Dockerfile.
+Un conteneur `Docker` est une boîte fermée : on ne voit pas ce qu'il se passe à l'intérieur. Quand une application ne démarre pas, plante silencieusement ou se comporte de manière inattendue, il faut des outils pour investiguer.
 
-## Solution
+Docker fournit un ensemble de commandes qui permettent de :
 
-### Étape 1 — Observer la taille des images sans sans `.dockerignore`
+* **Lire les logs** d'un conteneur pour comprendre ce qu'il affiche sur `stdout` et `stderr`
+* **Entrer dans un conteneur** pour inspecter son système de fichiers et exécuter des commandes
+* **Inspecter la configuration** d'un conteneur (variables d'environnement, volumes, état, ...)
+* **Surveiller les ressources** consommées par un conteneur (CPU, mémoire, réseau)
+* **Observer les événements** du daemon Docker en temps réel
 
-Préparation (builds locaux) :
+## Les commandes essentielles
 
-```bash
-# Lancer les commandes de récupération des dépendances et de build
-# Backend
-cd backend
-dotnet restore
-dotnet publish --configuration Release -o publish
-# frontend
-cd ../frontend
-npm install
-npm run build
-```
+### `docker logs` — Lire les logs d'un conteneur
 
-Build sans `.dockerignore` :
+Chaque conteneur écrit ses logs sur `stdout` et `stderr`. La commande `docker logs` permet de visualiser les logs comme `tail -f` le ferait.
 
 ```bash
-# Build du frontend
-cd frontend
-docker build -t hello-dockerignore-front:noignore -f Dockerfile.front .
-# [+] Building ...
-# => [internal] load build context
-# => => transferring context: XXX MB     ← node_modules, build/, images/ sont envoyés
+# Afficher tous les logs d'un conteneur
+docker logs <ID conteneur ou name>
+
+# Suivre les logs en temps réel (comme tail -f)
+docker logs -f <ID conteneur ou name>
+
+# Afficher les logs avec les timestamps
+# Redondant si le logger affiche déjà la date
+docker logs -t <ID conteneur ou name>
+
+# Affiche 5 dernières lignes les logs 
+docker logs --tail 5 <ID conteneur ou name>
+
+# Combiner les options
+docker logs -ft <ID conteneur ou name>
 ```
+
+> **Bonne pratique** : dans un conteneur `Docker`, l'application ne doit jamais écrire ses logs dans un fichier. Elle doit écrire sur `stdout`/`stderr` pour que `Docker` (et les outils d'orchestration comme Kubernetes) puissent les collecter automatiquement.
+
+### `docker exec` — Exécuter une commande dans un conteneur
+
+`docker exec` permet d'exécuter une commande à l'intérieur d'un conteneur en cours d'exécution. C'est l'équivalent d'un `ssh` pour un conteneur.
 
 ```bash
-# Build du backend
-cd ../backend
-docker build -t hello-dockerignore-back:noignore -f Dockerfile.back .
-# [+] Building ...
-# => [internal] load build context
-# => => transferring context: XXX MB     ← bin/, obj/, publish/, images/ sont envoyés
+# Ouvrir un shell interactif dans un conteneur
+docker exec -it <ID conteneur ou name> /bin/sh
+
+# Ouvrir un shell bash dans le conteneur (s'il est disponible)
+docker exec -it <ID conteneur ou name> /bin/bash
+
+# Exécuter une simple commande
+docker exec <ID conteneur ou name> ls -la /app
+
+# Afficher toutes les variables d'environnement
+docker exec <ID conteneur ou name> env
+# Afficher le contenu d'une variable d'environnement
+docker exec <ID conteneur ou name> printenv APP_ENVIRONMENT
+
+# Tester la connectivité réseau depuis le conteneur (port 80 pour nginx)
+docker exec <ID conteneur ou name> curl http://localhost:80
 ```
 
-Lancement du backend et du frontend :
+> **Attention** : les images basées sur `alpine` ne contiennent pas `/bin/bash`, il faut utiliser `/bin/sh`. De manière générale, les images de production sont minimalistes et ne contiennent pas d'outils comme `curl`, `wget` ou `vim`. C'est normal et voulu pour des raisons de sécurité et de taille d'image.
+
+### `docker inspect` — Inspecter la configuration d'un conteneur
+
+Comme vu lors des parties précédentes, `docker inspect` retourne toute la configuration d'un conteneur ou d'une image au format JSON. C'est la commande la plus complète pour comprendre l'état d'un conteneur.
 
 ```bash
-docker run -d -p 3000:3000 hello-dockerignore-front:noignore
-docker run -d -p 8080:8080 hello-dockerignore-back:noignore
+# Inspecter un conteneur
+docker inspect <ID conteneur ou name>
+
+# Filtrer avec --format pour extraire une information précise
+
+# Voir les variables d'environnement
+docker inspect --format '{{.Config.Env}}' <ID conteneur ou name>
+
+# Voir l'état du conteneur (running, exited, etc.)
+docker inspect --format '{{.State.Status}}' <ID conteneur ou name>
+
+# Voir le code de sortie d'un conteneur arrêté
+docker inspect --format '{{.State.ExitCode}}' <ID conteneur ou name>
+
+# Voir les ports exposés et leurs mappings
+docker inspect --format '{{.NetworkSettings.Ports}}' <ID conteneur ou name>
+
+# Voir les volumes montés
+docker inspect --format '{{.Mounts}}' <ID conteneur ou name>
+
+# Inspecter une image (voir ses layers, ENV, CMD, etc.)
+docker inspect <image>
 ```
 
-Lancement de l'application dans un navigateur : [Front](http://localhost:3000)
+> **Astuce** : le résultat de `docker inspect` est un JSON. Il est possible d'utiliser `jq` pour faciliter la récupération d'information : `docker inspect <conteneur> | jq '.[].Config.Env'`.
 
-#### Inspection de l'image du frontend
+### `docker stats` — Surveiller les ressources en temps réel
 
-Vérification de la taille des images :
+`docker stats` affiche en temps réel la consommation CPU, mémoire, réseau et I/O disque de chaque conteneur. C'est l'équivalent de la commande `top` pour les conteneurs.
 
 ```bash
-docker image ls hello-dockerignore-front
-IMAGE                             CONTENT SIZE
-hello-dockerignore-front:noignore        189MB
+# Surveiller tous les conteneurs en cours d'exécution
+docker stats
+
+# Surveiller un conteneur spécifique
+docker stats <ID conteneur ou name>
+# Sans le rafraîchissement
+docker stats --no-stream
 ```
 
-Vérification les fichiers dans l'image du frontend :
-
-```bash
-docker run --rm hello-dockerignore-front:noignore ls -la /app
-docker run --rm hello-dockerignore-front:noignore ls -la /app
-# drwxr-xr-x  build
-# -rwxr-xr-x  entrypoint.sh
-# -rw-r--r--  .DS_Store         => inutile au runtime
-# -rw-r--r--  .env              => inutile et contient potentiellement des secrets
-# drwxr-xr-x  .git              => ne sert à rien au runtime
-# -rw-r--r--  .gitignore        => ne sert à rien au runtime
-# -rw-r--r--  Dockerfile.front  => ne doit pas être contenue dans l'image finale
-# -rw-r--r--  README.md         => inutile
-# drwxr-xr-x  images            => alourdi l'image inutilement
-# -rw-r--r--  key.pem           => fichier sensible, ne devrait pas être stocké ici
-# drwxr-xr-x  node_modules      => inutile
-# -rw-r--r--  package-lock.json => inutile
-# -rw-r--r--  package.json      => inutile
-# drwxr-xr-x  public            => inutile, déjà contenu dans build
-# drwxr-xr-x  src               => inutile, déjà contenu dans build
-
-docker run --rm hello-dockerignore-front:noignore du -skh /app
-# 356.5M     ← très volumineux à cause de node_modules
-```
-
-> Le `Dockerfile.front` n'est pas multi-stage : le `COPY . .` copie tout le répertoire dans l'image finale.
-> On retrouve donc `node_modules/`, `src/`, `public/`, les images et même `key.pem` dans l'image.
-
-#### Vérifier les fichiers dans le stage de build du backend
-
-Le DOckerfile `Dockerfile.back` est en multi-stage : le stage runtime ne contient que le répertoire `publish`. Mais le stage build a quand même reçu tous les fichiers :
-
-```bash
-# Build en arrêtant la construction à la fin du stage de build
-docker build --target build -t hello-dockerignore-back:build-stage -f Dockerfile.back .
-
-docker run --rm hello-dockerignore-back:build-stage ls -la /src
-# -rw-r--r-- .DS_Store
-# drwxr-xr-x .git
-# -rw-r--r-- .gitignore
-# drwxr-xr-x .vscode
-# -rw-r--r-- Dockerfile.back
-# -rw-r--r-- Dockerfile.debug
-# -rw-r--r-- HelloDockerignore.csproj
-# -rw-r--r-- Program.cs
-# -rw-r--r-- README.md
-# drwxr-xr-x bin
-# drwxr-xr-x images
-# drwxr-xr-x obj
-# drwxr-xr-x publish
-```
-
-> Même si l'image finale du backend est légère grâce au multi-stage, les fichiers inutiles sont tout de même envoyés au daemon Docker, ce qui ralentit le build et peut invalider le cache inutilement.
-
-### Étape 2 — Créer les `.dockerignore`
-
-#### `.dockerignore` du frontend (`frontend/.dockerignore`)
-
-```Dockerfile
-# Dossiers liés au build local
-build/
-node_modules/
-
-# Fichiers VCS (git)
-.git/
-.gitignore
-
-# Fichiers Docker
-Dockerfile*
-*.dockerignore
-
-# Fichiers sensibles
-*.key
-*.pem
-
-# Documentation
-images/
-README.md
-```
-
-#### Explication des exclusions du frontend
-
-| Pattern          | Ce qui est exclu         | Pourquoi                                                         |
-| ---------------- | ------------------------ | ---------------------------------------------------------------- |
-| `node_modules/`  | Dépendances locales      | Réinstallé par `npm ci` dans le conteneur                        |
-| `build/`         | Build local React        | Inutile : le build se fait dans le conteneur via `npm run build` |
-| `*.pem` `*.key`  | Fichiers sensibles       | `key.pem` ne doit jamais se retrouver dans l'image               |
-| `images/`        | Assets non liés au build | Alourdit le build context inutilement                            |
-| `Dockerfile*`    | Fichiers Docker          | Ne fait pas partie de l'application                              |
-
-#### `.dockerignore` du backend (`backend/.dockerignore`)
-
-```Dockerfile
-# Lié au build local
-bin/
-obj/
-publish/
-
-# Fichiers VCS (git)
-.git/
-.gitignore
-
-# Fichiers Docker
-Dockerfile*
-*.dockerignore
-
-# Documentation
-images/
-README.md
-```
-
-#### Explication des exclusions du backend
-
-| Pattern       | Ce qui est exclu         | Pourquoi                                                       |
-| ------------- | ------------------------ | -------------------------------------------------------------- |
-| `bin/` `obj/` | Compilation locale       | Inutile : le `dotnet restore` se fait dans le conteneur        |
-| `publish/`    | Publication locale       | Inutile : le publish se fait dans le stage build du conteneur  |
-| `images/`     | Assets non liés au build | Alourdit le build context                                      |
-| `Dockerfile`  | Fichiers Docker          | Ne fait pas partie de l'application                            |
-
-#### Rebuild et comparaison
-
-> Pour réellement minimiser la taille de l'image du frontend, il est nécessaire de convertir le `Dockerfile` en multi-stage build sous peine d'embarquer les `node_modules` au runtime. Pour cela, on va utiliser `Dockerfile.multi` :
-
-```bash
-# Rebuild du frontend
-cd frontend
-docker build -t hello-dockerignore-front:ignore -f Dockerfile.multi .
-# => [internal] load build context
-# => => transferring context: ...
-
-# Rebuild du backend
-cd ../backend
-docker build -t hello-dockerignore-back:ignore -f Dockerfile.back .
-# => [internal] load build context
-# => => transferring context: ~10kB      ← drastiquement réduit
-```
-
-Comparaison des tailles d'image du **frontend** (là où le `.dockerignore` a le plus d'impact car il n'est pas multi-stage) :
-
-```bash
-docker image ls hello-dockerignore-front
-# REPOSITORY                         CONTENT SIZE
-# hello-dockerignore-front:noignore         189MB
-# hello-dockerignore-front:ignore          52.9MB
-```
-
-Vérification du contenu de l'image du frontend :
-
-```bash
-docker run --rm hello-dockerignore-front:ignore ls -la /app
-# -rwxr-xr-x  ... entrypoint.sh
-# -rw-r--r--  ... package.json
-# -rw-r--r--  ... package-lock.json
-# drwxr-xr-x  ... build/             ← généré par npm run build dans le conteneur
-# drwxr-xr-x  ... node_modules/      ← installé par npm ci dans le conteneur
-```
-
-> `key.pem`, `images/`, `src/`, `public/`, `Dockerfile.front` et `README.md` ont disparu.
-
-Pour le backend, la taille de l'image finale ne change pas grâce au multi-stage, mais le build context est réduit, ce qui accélère la rapidité de build et diminue la taille des layers :
-
-```bash
-docker image ls hello-dockerignore-back
-# REPOSITORY                      CONTENT SIZE
-# hello-dockerignore-back:ignore          88MB (identique)
-```
-
-> Le multi-stage permet de minimiser la taille de l'image finale même sans `.dockerignore` mais il reste essentiel pour :
->
-> * **Accélérer le transfert** du build context vers le daemon Docker (données limitées envoyées)
-> * **Préserver le cache** : sans `.dockerignore`, un changement dans `bin/`, `obj/` ou `images/` invalide le cache de `COPY . .` et force un rebuild complet (`dotnet restore` + `dotnet publish`)
-
-### Étape 3 — Créer un `Dockerfile.debug.dockerignore` spécifique
-
-Le `Dockerfile.debug` utilise un seul stage avec le SDK complet. Il installe `vsdbg` (le debugger VS Code pour .NET) et exécute l'application en mode Debug avec `dotnet run`.
-Pour information, la configuration de debug est utilisée à titre n'exemple mais n'est pas fonctionnelle.
-
-Le `.dockerignore` global exclut `Dockerfile*`, y compris `Dockerfile.debug` lui-même. On peut créer un `Dockerfile.debug.dockerignore` avec des règles différentes adaptées au contexte de debug :
-
-```Dockerfile
-# Dossiers liés au build local
-bin/
-obj/
-publish/
-
-# Fichiers VCS (git)
-.git/
-.gitignore
-
-# Fichiers Docker
-Dockerfile.back
-*.dockerignore
-
-# Documentation
-images/
-README.md
-```
-
-> Lors du build avec `Dockerfile.debug` (`docker build -f Dockerfile.debug`), docker cherche a utiliser en priorité le fichier `Dockerfile.debug.dockerignore`. S'il ne le trouve pas, le fichier `.dockerignore` est utilisé. Cela permet d'avoir différentes configuration `dockerignore` en fonction du build réalisé.
-
-#### Build et vérification
-
-```bash
-cd backend
-
-# Build avec le Dockerfile.debug (utilise automatiquement Dockerfile.debug.dockerignore)
-docker build -t hello-dockerignore-back:debug -f Dockerfile.debug .
-```
-
-Vérification que le `.dockerignore` spécifique est bien appliqué :
-
-```bash
-# La configuration .vscode est gardé dans l'image finale (ce n'est pas le cas avec Dockerfile.back)
-docker run --rm hello-dockerignore-back:debug ls .vscode
-# launch.json
-```
-
-### Bonus : impact sur le temps de build et le cache
-
-#### Mesurer le temps de build
-
-```bash
-cd frontend
-
-# Sans .dockerignore (renommer temporairement le fichier)
-mv .dockerignore .dockerignore.back
-time docker build --no-cache -t hello-dockerignore-front:noignore -f Dockerfile.front .
-# docker build --no-cache -t hello-dockerignore-front:noignore -f  .  2,25s user 4,68s system 22% cpu 30,474 total
-
-# Avec .dockerignore
-mv .dockerignore.back .dockerignore
-time docker build --no-cache -t hello-dockerignore-front:ignore -f Dockerfile.multi .
-# docker build --no-cache -t hello-dockerignore-front:ignore -f Dockerfile.mult  0,09s user 0,09s system 1% cpu 12,586 total
-```
-
-#### Analyser les layers avec `docker image history`
-
-```bash
-docker image history hello-dockerignore-front:noignore
-# IMAGE          CREATED         CREATED BY                                      SIZE      COMMENT
-# ...
-# <missing>      3 minutes ago   COPY . . # buildkit                             374MB     buildkit.dockerfile.v0
-
-docker image history hello-dockerignore-front:ignore
-# IMAGE          CREATED              CREATED BY                                      SIZE      COMMENT
-# ...
-# <missing>      About a minute ago   COPY /app/build /app # buildkit                 532kB     buildkit.dockerfile.v0
-```
-
-#### Tester l'invalidation du cache
-
-```bash
-cd frontend
-
-# Premier build
-docker build -t hello-dockerignore-front:cache-test -f Dockerfile.front .
-
-# Modifier le README (fichier exclu par .dockerignore)
-echo "modification" >> README.md
-
-# Rebuilder : le cache est toujours valide ✅
-docker build -t hello-dockerignore-front:cache-test -f Dockerfile.multi .
-# [+] Building 0.1s (14/14) FINISHED                                                                                                                     docker:colima
-# ...                                                                                                                     0.0s
-#  => CACHED [build 3/5] COPY . .  => Cache non modifié
-```
-
-> Sans `.dockerignore`, la modification du `README.md` aurait invalidé le cache de `COPY . .` et déclenché un rebuild complet : `npm ci` + `npm run build`.
-
-## Récapitulatif des points abordés
-
-| Bonne pratique                                       | Pourquoi                                                               |
-| ---------------------------------------------------- | ---------------------------------------------------------------------- |
-| Toujours créer un `.dockerignore`                    | Réduit le build context, protège les secrets et le cache               |
-| Exclure `bin/`, `obj/`, `node_modules/`              | La compilation et l'installation se font dans le conteneur             |
-| Exclure `*.pem`, `*.key`                             | Empêcher les fuites de secrets dans l'image                            |
-| Exclure `Dockerfile*`                                | Les Dockerfiles ne font pas partie de l'application                    |
-| `Dockerfile.dockerignore`                            | Gère les exclusions différentes par Dockerfile                         |
-| `Dockerfile.X.dockerignore` remplace `.dockerignore` | Il faut re-lister toutes les exclusions du `Dockerfile` (pas de merge) |
-| Le multi-stage ne suffit pas                         | Il protège l'image finale mais pas le build context ni le cache        |
-| `docker build --target`                              | Inspecte le contenu des stages intermédiaires                          |
-| `docker image history`                               | Analyser la taille de chaque layer                                     |
+Colonnes affichées par `docker stats` :
+
+* `CPU %` : Pourcentage CPU utilisé par le conteneur
+* `MEM USAGE / LIMIT` : Mémoire utilisée vs mémoire maximale autorisée
+* `MEM %` : Pourcentage mémoire utilisé
+* `NET I/O` : Données réseau entrantes / sortantes
+* `BLOCK I/O` : Données lues / écrites sur le disque
+* `PIDS` : Nombre de processus dans le conteneur
+
+> La commande `docker stats` est généralement utilisée pour détecter une fuite mémoire ou un conteneur qui consomme trop de CPU.
 
 ---
 
-[⬅️ 03-env-args](../../tree/03-env-args) ·
-[📋 Sommaire](../../tree/main) ·
-[05-troubleshooting ➡️](../../tree/05-troubleshooting)
+### `docker events` — Observer les événements du daemon Docker
 
-[📝 Retour à l'énoncé](../../tree/04-dockerignore)
+La commande `docker events` affiche en temps réel les événements émis par le daemon Docker : création, démarrage, arrêt, suppression de conteneurs, etc. C'est l'équivalent d'un journal d'audit.
+
+```bash
+# Écouter et suivre tous les événements
+docker events
+
+# Filtrer les événements sur une plage de temps
+docker events --since 10m --until 5m
+```
+
+Exemples d'événements observables :
+
+* `create` : Un conteneur a été créé
+* `start` : Un conteneur a démarré
+* `die` : Un conteneur s'est arrêté (crash ou arrêt normal)
+* `stop` : Un conteneur a été arrêté manuellement
+* `kill` : Un conteneur a été tué (signal envoyé)
+* `destroy` : Un conteneur a été supprimé
+* `oom` : Un conteneur a été tué par le système (Out Of Memory)
+
+> La commande `docker events` peut être utile pour comprendre pourquoi un conteneur crash au démarrageredémarre en boucle.
+> La liste complète des événements Docker est accessible ici : [docker system events](https://docs.docker.com/reference/cli/docker/system/events/).
+
+## Récapitulatif des commandes
+
+* Voir ce que l'application affiche : `docker logs -f <conteneur>`
+* Entrer dans le conteneur : `docker exec -it <conteneur> /bin/sh`
+* Voir la config complète (IP, ENV, état...) : `docker inspect <conteneur>`
+* Surveiller CPU / mémoire en temps réel : `docker stats`
+* Voir les événements Docker (start, die...) : `docker events`
+
+## Mise en pratique
+
+### But
+
+Utiliser les commandes de troubleshooting `Docker` pour diagnostiquer et résoudre des problèmes sur des conteneurs.
+
+### Préparation
+
+Lancer un conteneur `nginx` en arrière-plan :
+
+```bash
+docker run -d --name web-test -p 8080:80 nginx:alpine
+```
+
+Vérifier que le conteneur tourne :
+
+```bash
+docker ps
+```
+
+### Étape 1 — Analyser les logs
+
+1. Afficher les logs du conteneur `web-test`
+2. Lancer plusieurs fois la commande `curl -s http://localhost:8080`
+3. Observer les logs en temps réel en mode `follow` (option `f`) et vérifier les logs des nouvelles requêtes
+4. Afficher uniquement les 5 dernières lignes de logs en mode `follow`
+
+### Étape 2 — Explorer l'intérieur d'un conteneur
+
+1. Ouvrir un shell interactif dans le conteneur `web-test`
+2. Lister le contenu du répertoire `/usr/share/nginx/html/`
+3. Afficher le contenu du fichier `index.html`
+4. Afficher toutes les variables d'environnement du conteneur
+5. Sortir du shell avec `exit`
+
+### Étape 3 — Inspecter la configuration
+
+1. Récupérer l'adresse IP du conteneur `web-test` en utilisant `docker inspect` avec l'option `--format`
+2. Récupérer le statut du conteneur (`running`, `exited`, etc.)
+3. Lister les variables d'environnement définies dans l'image via `docker inspect`
+4. Afficher les ports exposés et leurs mappings
+
+### Étape 4 — Surveiller les ressources
+
+1. Lancer `docker stats` et observer la consommation du conteneur `web-test` au repos
+2. Dans un autre terminal, simuler de la charge :
+
+    ```bash
+    # Envoyer 1000 requêtes sur le conteneur
+    for i in $(seq 1 3000); do curl -s http://localhost:8080 > /dev/null; done
+    ```
+
+3. Observer l'évolution du CPU et du réseau avec `docker stats`
+
+### Étape 5 — Observer les événements
+
+1. Ouvrir un terminal dédié et lancer `docker events --filter container=web-test`
+2. Dans un autre terminal, exécuter successivement :
+
+   ```bash
+    docker stop web-test
+    docker start web-test
+    docker restart web-test
+   ```
+
+3. Observer les événements générés dans le premier terminal
+
+### Étape 6 — Diagnostiquer un conteneur qui crash
+
+Simuler le crash au démarrage d'un conteneur :
+
+```bash
+docker run -d --name crash-test alpine sh -c "echo 'Démarrage...' && sleep 2 && exit 1"
+```
+
+1. Vérifier l'état du conteneur avec `docker ps -a` (noter le statut `Exited`)
+2. Lire les logs pour comprendre ce qu'il s'est passé
+3. Récupérer le code de sortie du conteneur avec `docker inspect`
+
+### Nettoyage
+
+```bash
+docker rm web-test crash-test
+```
+
+### Validation
+
+* [ ] Les logs du conteneur `web-test` affichent les requêtes HTTP entrantes
+* [ ] Connexion en mode interactif dans le conteneur et affichage du fichier `index.html`
+* [ ] L'adresse IP du conteneur a été récupérée via `docker inspect`
+* [ ] Vérification de l'augmentation du CPU et réseau pendant la simulation de montée en charge avec `docker stats`
+* [ ] Vérification des événements `stop`, `start`, `die` avec la commande `docker events`
+* [ ] Le code de sortie `1` du conteneur `crash-test` a été identifié via `docker inspect`
+
+### Bonus
+
+* Utiliser `docker inspect` pour comparer la configuration de deux conteneurs lancés à partir de la même image mais avec des variables d'environnement différentes
+* Utiliser `docker cp` pour copier un fichier vers le conteneur nginx : remplacer le fichier index.html
+* Utiliser `docker cp` pour copier un fichier depuis le conteneur
+
+### Liens utiles
+
+* [Documentation docker logs](https://docs.docker.com/reference/cli/docker/container/logs/)
+* [Documentation docker exec](https://docs.docker.com/reference/cli/docker/container/exec/)
+* [Documentation docker inspect](https://docs.docker.com/reference/cli/docker/inspect/)
+* [Documentation docker stats](https://docs.docker.com/reference/cli/docker/container/stats/)
+* [Documentation docker events](https://docs.docker.com/reference/cli/docker/system/events/)
+* [Documentation des commandes de référence](https://docs.docker.com/reference/dockerfile/)
+
+---
+
+[⬅️ 04-dockerignore](../../tree/04-dockerignore) ·
+[📋 Sommaire](../../tree/main) ·
+[06-securite-non-root ➡️](../../tree/06-securite-non-root)
+
+💡 [Voir la solution](../../tree/05-troubleshooting--solution)

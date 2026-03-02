@@ -8,10 +8,11 @@ RUN dotnet publish --configuration Release -o /app/publish
 # ---------- Stage 2 : Runtime ----------
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 WORKDIR /app
-# Copier les fichiers avec le bon propriétaire (utiliser l'option --chown de COPY)
-COPY --from=build /app/publish .
 
-# Utiliser l'utilisateur intégré .NET pour exécuter l'application en non-root
-# (les images .NET 8+ fournissent un utilisateur prêt à l'emploi nommé "app")
+# Copier les fichiers avec le bon propriétaire
+COPY --from=build --chown=app /app/publish .
+
+# Utiliser l'utilisateur intégré .NET
+USER app
 
 ENTRYPOINT ["dotnet", "HelloNonRoot.dll"]

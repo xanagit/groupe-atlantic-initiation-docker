@@ -9,13 +9,14 @@ RUN dotnet publish --configuration Release -o /app/publish
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 
 # Créer un utilisateur "appuser" sans shell de login
-# (Utiliser la commande useradd)
+RUN useradd -r -s /bin/false appuser
 
 WORKDIR /app
 
-# Copier les fichiers avec le bon propriétaire (utiliser l'option --chown de COPY)
-COPY --from=build /app/publish .
+# Copier les fichiers avec le bon propriétaire
+COPY --from=build --chown=appuser /app/publish .
 
-# Basculer vers l'utilisateur non-root avec l'instruction USER
+# Basculer vers l'utilisateur non-root
+USER appuser
 
 ENTRYPOINT ["dotnet", "HelloNonRoot.dll"]

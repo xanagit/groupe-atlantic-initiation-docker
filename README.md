@@ -1,432 +1,250 @@
-# Troubleshooting Docker : solution
+# Sécurité : exécuter un conteneur en non-root
 
-[⬅️ 04-dockerignore](../../tree/04-dockerignore) ·
+[⬅️ 05-troubleshooting](../../tree/05-troubleshooting) ·
 [📋 Sommaire](../../tree/main) ·
-[06-securite-non-root ➡️](../../tree/06-securite-non-root)
+[07-securite-secrets ➡️](../../tree/07-securite-secrets)
 
-[📝 Retour à l'énoncé](../../tree/05-troubleshooting)
+💡 [Voir la solution](../../tree/06-securite-non-root--solution)
 
 ---
 
-## Rappel de l'objectif
+## Pourquoi ne pas exécuter un conteneur en root ?
 
-Utiliser les commandes de troubleshooting `Docker` (`docker logs`, `docker exec`, `docker inspect`, `docker stats`, `docker events`) pour diagnostiquer et résoudre des problèmes sur des conteneurs.
+Par défaut, un conteneur `Docker` s'exécute avec l'utilisateur `root` (UID 0). Cela signifie que le processus principal du conteneur dispose de tous les privilèges d'administration à l'intérieur du conteneur.
 
-## Solution
+Si une faille de sécurité est exploitée dans l'application (injection de commande, exécution de code arbitraire, ...), l'attaquant obtient immédiatement un accès root dans le conteneur. Combiné à une vulnérabilité d'évasion de conteneur (_container escape_), il peut potentiellement compromettre la machine hôte.
 
-### Préparation
+Le principe de moindre privilège (`least privilege`) recommande de n'accorder à un processus que les permissions strictement nécessaires à son fonctionnement. Exécuter un conteneur en non-root réduit la surface d'attaque et limite les dégâts en cas de compromission.
 
-Lancer le conteneur `nginx` en arrière-plan :
+### Les risques
 
-```bash
-docker run -d --name web-test -p 8080:80 nginx:alpine
+| Critère                      | En root (par défaut)                                             | En non-root                                             |
+| ---------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------- |
+| Accès au système de fichiers | Lecture / écriture sur tous les fichiers du conteneur            | Limité aux fichiers dont l'utilisateur est propriétaire |
+| Impact d'une compromission   | Accès total au conteneur, risque d'évasion                       | Accès restreint, dégâts limités                         |
+| Conformité Kubernetes        | Bloqué par les `SecurityContext` et les `Pod Security Standards` | ✅ Compatible                                           |
+| Bonnes pratiques             | ❌ Déconseillé en production                                     | ✅ Recommandé                                           |
+
+> **Point clé** : la plupart des orchestrateurs de conteneurs comme Kubernetes imposent ou recommandent fortement l'exécution en non-root via des politiques de sécurité. Adopter cette pratique dès le développement évite les mauvaises surprises au déploiement.
+
+### L'instruction `USER`
+
+L'instruction `USER` dans un Dockerfile définit l'utilisateur sous lequel les instructions suivantes (`RUN`, `CMD`, `ENTRYPOINT`) sont exécutées. Elle s'applique aussi au conteneur au runtime.
+
+```dockerfile
+# Par nom d'utilisateur
+USER appuser
+
+# Par UID
+USER 1001
 ```
 
-Vérifier que le conteneur tourne :
+> **Attention** : l'instruction `USER` ne crée pas l'utilisateur. Il faut le créer au préalable avec `RUN` avant de pouvoir l'utiliser.
 
-```bash
-docker ps
-# CONTAINER ID   IMAGE          COMMAND                  CREATED         STATUS         PORTS                                     NAMES
-# 46a7939bc611   nginx:alpine   "/docker-entrypoint.…"   5 seconds ago   Up 4 seconds   0.0.0.0:8080->80/tcp, [::]:8080->80/tcp   web-test
+### Création d'un utilisateur dans un Dockerfile
+
+La création d'un utilisateur dépend de la distribution de l'image de base.
+
+**Images basées sur Debian/Ubuntu** (cas des images `mcr.microsoft.com/dotnet/aspnet:8.0`) :
+
+```dockerfile
+RUN groupadd -r appgroup && useradd -r -g appgroup -s /bin/false appuser
 ```
 
-### Étape 1 — Analyser les logs
+**Images basées sur Alpine** :
 
-#### 1. Afficher les logs du conteneur
-
-```bash
-docker logs web-test
-# /docker-entrypoint.sh: /docker-entrypoint.d/ is not empty, will attempt to perform configuration
-# /docker-entrypoint.sh: Looking for shell scripts in /docker-entrypoint.d/
-# /docker-entrypoint.sh: Launching /docker-entrypoint.d/10-listen-on-ipv6-by-default.sh
-# 10-listen-on-ipv6-by-default.sh: info: Getting the checksum of /etc/nginx/conf.d/default.conf
-# ...
-# 2026/03/02 11:10:23 [notice] 1#1: using the "epoll" event method
-# 2026/03/02 11:10:23 [notice] 1#1: nginx/1.29.5
-# 2026/03/02 11:10:23 [notice] 1#1: built by gcc 15.2.0 (Alpine 15.2.0)
-# ...
+```dockerfile
+RUN addgroup -S appgroup && adduser -S -G appgroup -s /bin/false appuser
 ```
 
-#### 2. Générer des requêtes HTTP
+Les options de la commande `useradd` :
 
-```bash
-curl -s http://localhost:8080
-curl -s http://localhost:8080
-curl -s http://localhost:8080
+* `-r` / `-S` : Crée un utilisateur/groupe système (sans répertoire home inutile)
+* `-g` / `-G` : Spécifie le groupe principal
+* `-s /bin/false` : Désactive le shell de login (sécurité supplémentaire)
+
+### L'option `--chown` de `COPY`
+
+Par défaut, les fichiers copiés avec `COPY` appartiennent à `root:root`. Il est préférable de changer le propriétaire des fichiers lors de la copie en utilisant l'option `--chown` de l'instruction `COPY`. Cela permet de spécifier le propriétaire directement lors de la copie, sans créer de layer supplémentaire :
+
+```dockerfile
+COPY --from=build --chown=appuser:appgroup /app/publish .
 ```
 
-#### 3. Observer les logs en temps réel
+> **Bonne pratique** : il est préférable d'utiliser directement `COPY --chown` au lieu de `RUN chown -R` après une commande de copie. L'instruction `RUN chown` crée une layer supplémentaire qui duplique les fichiers.
 
-```bash
-docker logs -f web-test
-# ...
-# 172.17.0.1 - - [xx/xxx/2025:xx:xx:xx +0000] "GET / HTTP/1.1" 200 615 "-" "curl/8.x.x"
-# 172.17.0.1 - - [xx/xxx/2025:xx:xx:xx +0000] "GET / HTTP/1.1" 200 615 "-" "curl/8.x.x"
-# 172.17.0.1 - - [xx/xxx/2025:xx:xx:xx +0000] "GET / HTTP/1.1" 200 615 "-" "curl/8.x.x"
+### L'utilisateur intégré dans les images .NET 8+
+
+Depuis `.NET 8`, Microsoft fournit un utilisateur non-root prêt à l'emploi dans ses images Docker :
+
+* **Nom** : `app`
+* **UID** : `1654`
+* **Variable d'environnement** : `APP_UID=1654`
+
+Cela permet de simplifier la mise en place :
+
+```dockerfile
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+WORKDIR /app
+COPY --from=build --chown=app /app/publish .
+USER app
+ENTRYPOINT ["dotnet", "MyApp.dll"]
 ```
 
-> Chaque requête `curl` génère une ligne de log dans le conteneur. Le `-f` (follow) permet de visualiser les requêtes au fur et à mesure. La commande `Ctrl+C`permet de quitter le mode `follow`.
+> **Point clé** : utiliser l'utilisateur intégré `app` est la méthode recommandée pour les applications `.NET 8+`. Pour les autres langages, il faut créer l'utilisateur manuellement.
 
-#### 4. Afficher les 5 dernières lignes en mode follow
+## Mise en pratique
 
-```bash
-docker logs -f --tail 5 web-test
-# 172.17.0.1 - - [xx/xxx/2025:xx:xx:xx +0000] "GET / HTTP/1.1" 200 615 "-" "curl/8.x.x"
-# 172.17.0.1 - - [xx/xxx/2025:xx:xx:xx +0000] "GET / HTTP/1.1" 200 615 "-" "curl/8.x.x"
-# 172.17.0.1 - - [xx/xxx/2025:xx:xx:xx +0000] "GET / HTTP/1.1" 200 615 "-" "curl/8.x.x"
-# ...
-# Les nouvelles requêtes s'affichent ici au fur et à mesure
-```
+### But
 
-> L'option `--tail 5` évite d'afficher tout l'historique des logs. C'est une combinaison utile en production pour suivre les derniers événements sans être noyé par l'historique.
+1. Observer qu'un conteneur s'exécute par défaut en `root`
+2. Modifier un Dockerfile pour créer un utilisateur non-root et exécuter l'application avec celui-ci
+3. Utiliser l'utilisateur intégré des images `.NET 8+`
 
-### Étape 2 — Explorer l'intérieur d'un conteneur
+### L'application
 
-#### 1. Ouvrir un shell interactif
+L'application reprend l'API web `ASP.NET Core 8.0` des exercices précédents. Le endpoint `/` retourne un JSON qui inclut le nom de l'utilisateur exécutant le processus, ce qui permet de vérifier visuellement si le conteneur tourne en root ou non.
 
-```bash
-docker exec -it web-test /bin/sh
-```
+Endpoints exposés :
 
-> L'image `nginx:alpine` (basée sur Alpine Linux) utilise `/bin/sh` (et non `/bin/bash`).
+* `GET /` : JSON avec le titre, l'utilisateur du processus et un message
+* `GET /health` : JSON `{ "status": "up" }`
 
-#### 2. Lister le contenu du répertoire HTML
+### Étape 1 — Observer qu'un conteneur s'exécute par défaut en `root`
+
+Construire et lancer le conteneur à partir du `Dockerfile.root` :
 
 ```bash
-# Dans le shell du conteneur
-ls -la /usr/share/nginx/html/
-# total 16
-# drwxr-xr-x    2 root     root          4096 Feb  4 23:53 .
-# drwxr-xr-x    3 root     root          4096 Feb  4 23:53 ..
-# -rw-r--r--    1 root     root           497 Feb  4 20:18 50x.html
-# -rw-r--r--    1 root     root           615 Feb  4 20:18 index.html
+# Construire l'image
+docker build -t hello-nonroot:root -f Dockerfile.root .
+
+# Lancer le conteneur
+docker run -d -p 8080:8080 --name nonroot-test hello-nonroot:root
 ```
 
-> Ce répertoire contient les fichiers servis par `nginx` par défaut : la page d'accueil `index.html` et la page d'erreur `50x.html`.
-
-#### 3. Afficher le contenu du fichier `index.html`
+Vérifier quel utilisateur exécute le processus dans le conteneur :
 
 ```bash
-# Dans le shell du conteneur
-cat /usr/share/nginx/html/index.html
-# <!DOCTYPE html>
-# <html>
-# <head>
-# <title>Welcome to nginx!</title>
-# ...
-# </html>
+# Via l'API
+curl -s http://localhost:8080 | jq
+
+# Via docker exec
+docker exec nonroot-test whoami
+docker exec nonroot-test id
 ```
 
-#### 4. Afficher les variables d'environnement
+> 💡 Le endpoint `/` affiche `"user": "root"` et la commande `whoami` retourne `root`. Le processus tourne avec les privilèges les plus élevés.
+
+Observer les permissions sur les fichiers de l'application :
 
 ```bash
-# Dans le shell du conteneur
-env
-# PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-# HOSTNAME=abc123def456
-# TERM=xterm
-# NGINX_VERSION=1.27.x
-# NJS_VERSION=0.8.x
-# NJS_RELEASE=1
-# PKG_RELEASE=1
-# DYNPKG_RELEASE=1
-# HOME=/root
+docker exec nonroot-test ls -la /app
 ```
 
-> On retrouve les variables standard (`PATH`, `HOSTNAME`) ainsi que les variables spécifiques à l'image `nginx` comme `NGINX_VERSION`. Le `HOSTNAME` icontient à l'ID du conteneur.
+### Étape 2 — Créer un utilisateur non-root
 
-#### 5. Sortir du shell
+Modifier le fichier `Dockerfile.nonroot` pour :
+
+1. Créer un utilisateur `appuser` sans shell de login
+2. Copier les fichiers avec le bon propriétaire en utilisant l'option `--chown` de `COPY`
+3. Demander à l'image d'utiliser `appuser` comme utilisateur avec l'instruction `USER`
+
+> L'image `mcr.microsoft.com/dotnet/aspnet:8.0` est basée sur Debian : utiliser la commande `useradd`.
+
+Construire et lancer le conteneur :
 
 ```bash
-exit
-# Ou Ctrl + D
+# Construire l'image
+docker build -t hello-nonroot:nonroot -f Dockerfile.nonroot .
+
+# Lancer le conteneur
+docker run -d -p 8080:8080 --name nonroot-nonroot hello-nonroot:nonroot
 ```
 
-### Étape 3 — Inspecter la configuration
-
-#### 1. Récupérer l'adresse IP du conteneur
+Vérifier que le processus ne tourne plus en root :
 
 ```bash
-# Commande pour rechercher le chemin JSON de l'adresse IP
-docker inspect web-test | jq -c 'paths' | grep I
-# Récupération de l'adresse IP
-docker inspect --format '{{.NetworkSettings.Networks.bridge.IPAddress}}' web-test
-# 172.17.0.2
+# Via l'API
+curl -s http://localhost:8080 | jq
+
+# Via docker exec
+docker exec nonroot-nonroot whoami
+docker exec nonroot-nonroot id
 ```
 
-#### 2. Récupérer le statut du conteneur
+### Étape 3 — Utiliser l'utilisateur intégré .NET
+
+Partir du fichier `Dockerfile.dotnet` et utiliser l'utilisateur intégré `app` fourni par l'image `.NET 8` au lieu de créer un utilisateur manuellement.
+
+Construire et tester :
 
 ```bash
-# Commande pour rechercher le chemin JSON du status
-docker inspect web-test | jq -c 'paths' | grep Status
-# Récupération du status
-docker inspect --format '{{.State.Status}}' web-test
-# running
+# Construire l'image
+docker build -t hello-nonroot:dotnet -f Dockerfile.dotnet .
+
+# Lancer le conteneur
+docker run -d -p 8080:8080 --name nonroot-dotnet hello-nonroot:dotnet
+
+# Vérifier l'utilisateur
+curl -s http://localhost:8080 | jq
+docker exec nonroot-dotnet whoami
+docker exec nonroot-dotnet id
 ```
 
-#### 3. Lister les variables d'environnement via `docker inspect`
+### Validation
+
+* [ ] `docker build` se termine sans erreur pour les trois Dockerfiles
+* [ ] Avec `Dockerfile.root` : `whoami` retourne `root` et le JSON affiche `"user": "root"`
+* [ ] Avec `Dockerfile.nonroot` : `whoami` retourne `appuser` et le JSON affiche `"user": "appuser"`
+* [ ] Avec `Dockerfile.dotnet` : `whoami` retourne `app` et le JSON affiche `"user": "app"`
+* [ ] `curl -s http://localhost:8080/health` retourne `{ "status": "up" }` pour les trois images
+* [ ] L'application fonctionne correctement en non-root (pas d'erreur de permission)
+
+### Commandes de build & run
 
 ```bash
-docker inspect --format '{{.Config.Env}}' web-test
-# [PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin NGINX_VERSION=1.29.5 PKG_RELEASE=1 DYNPKG_RELEASE=1 NJS_VERSION=0.9.5 NJS_RELEASE=1 ACME_VERSION=0.3.1]
+# Construire les trois versions
+docker build -t hello-nonroot:root -f Dockerfile.root .
+docker build -t hello-nonroot:nonroot -f Dockerfile.nonroot .
+docker build -t hello-nonroot:dotnet -f Dockerfile.dotnet .
+
+# Lancer les conteneurs
+docker run -d --name nonroot-root -p 8080:8080 hello-nonroot:root
+docker run -d --name nonroot-nonroot -p 8080:8080 -d hello-nonroot:nonroot
+docker run -d --name nonroot-dotnet -p 8080:8080 -d --name nonroot-test hello-nonroot:dotnet
 ```
 
-Utiliser `jq` pour un affichage plus lisible :
+Commandes utiles :
 
 ```bash
-docker inspect web-test | jq '.[].Config.Env'
-# [
-#   "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-#   "NGINX_VERSION=1.29.5",
-#   "PKG_RELEASE=1",
-#   "DYNPKG_RELEASE=1",
-#   "NJS_VERSION=0.9.5",
-#   "NJS_RELEASE=1",
-#   "ACME_VERSION=0.3.1"
-# ]
+# Tester l'API
+curl -s http://localhost:8080 | jq
+curl -s http://localhost:8080/health | jq
+
+# Vérifier l'utilisateur dans le conteneur
+docker exec <conteneur> whoami
+docker exec <conteneur> id
+
+# Voir les permissions sur les fichiers
+docker exec <conteneur> ls -la /app
 ```
 
-> `docker inspect --format` utilise la syntaxe Go template. `jq` est souvent plus pratique pour naviguer dans le JSON.
+### Bonus
 
-#### 4. Afficher les ports exposés et leurs mappings
+* Tenter de lancer une commande `apt-get update` dans le conteneur non-root et observer l'erreur de permission
 
-```bash
-# Commande pour rechercher le chemin JSON du status
-docker inspect web-test | jq -c 'paths' | grep -i port
-# Récupération du port
-docker inspect --format '{{.NetworkSettings.Ports}}' web-test
-# map[80/tcp:[{0.0.0.0 8080} {:: 8080}]]
-```
+### Liens utiles
 
-Avec `jq`  pour plus de lisibilité :
-
-```bash
-docker inspect web-test | jq '.[].NetworkSettings.Ports'
- # {
- #   "80/tcp": [
- #     {
- #       "HostIp": "0.0.0.0",
- #       "HostPort": "8080"
- #     },
- #     {
- #       "HostIp": "::",
- #       "HostPort": "8080"
- #     }
- #   ]
- # }
-```
-
-> Le port `80` du conteneur est mappé sur le port `8080` de l'hôte, conformément au `-p 8080:80` passé au `docker run`.
-
-### Étape 4 — Surveiller les ressources
-
-#### 1. Observer la consommation au repos
-
-```bash
-docker stats --no-stream web-test
-# CONTAINER ID   NAME       CPU %     MEM USAGE / LIMIT     MEM %     NET I/O          BLOCK I/O         PIDS
-# 46a7939bc611   web-test   0.00%     4.602MiB / 5.772GiB   0.08%     2.07kB / 1.4kB   8.19kB / 24.6kB   5
-```
-
-> Au repos, `nginx` consomme très peu de ressources : quasi 0% de CPU et quelques Mo de mémoire.
-
-#### 2. Simuler de la charge
-
-Dans un second terminal :
-
-```bash
-for i in $(seq 1 3000); do curl -s http://localhost:8080 > /dev/null; done
-```
-
-#### 3. Observer l'évolution avec `docker stats`
-
-Dans le premier terminal :
-
-```bash
-docker stats web-test
-# CONTAINER ID   NAME       CPU %     MEM USAGE / LIMIT    MEM %     NET I/O           BLOCK I/O         PIDS
-# 46a7939bc611   web-test   1.62%     4.73MiB / 5.772GiB   0.08%     3.46MB / 7.53MB   8.19kB / 24.6kB   5
-```
-
-> Pendant la charge, on observe une augmentation du `CPU %` et du `NET I/O`. La mémoire reste stable car `nginx` gère de manière efficace les connexions.
-
-### Étape 5 — Observer les événements
-
-#### 1. Lancer l'écoute des événements
-
-Dans un premier terminal :
-
-```bash
-docker events --filter container=web-test
-```
-
-#### 2. Manipuler le conteneur
-
-Dans un second terminal :
-
-```bash
-docker stop web-test
-docker start web-test
-docker restart web-test
-```
-
-#### 3. Observer les événements générés
-
-Le premier terminal affiche :
-
-```bash
-docker stop web-test
-# 2026-03-02T14:13:07.074253260+01:00 container kill 46a7939bc (...)
-# 2026-03-02T14:13:07.163512978+01:00 container stop 46a7939bc (...)
-# 2026-03-02T14:13:07.164877973+01:00 container die 46a7939bc (...)
-
-docker start web-test
-# 2026-03-02T14:14:37.447997267+01:00 container start 46a7939bc (...)
-
-docker restart web-test
-# 2026-03-02T14:15:18.856547537+01:00 container kill 46a7939bc (... signal=3)
-# 2026-03-02T14:15:18.949550526+01:00 container stop 46a7939bc (...)
-# 2026-03-02T14:15:18.950907646+01:00 container die 46a7939bc (... exitCode=0)
-# 2026-03-02T14:15:19.008289643+01:00 container start 46a7939bc (...)
-# 2026-03-02T14:15:19.008302018+01:00 container restart 46a7939bc (...)
-```
-
-### Étape 6 — Diagnostiquer un conteneur qui crash
-
-#### Lancer le conteneur cassé
-
-```bash
-docker run -d --name crash-test alpine sh -c "echo 'Démarrage...' && sleep 2 && exit 1"
-```
-
-#### 1. Vérifier l'état du conteneur
-
-```bash
-docker ps -a
-# CONTAINER ID   IMAGE          COMMAND                  CREATED          STATUS                      PORTS   NAMES
-# def789ghi012   alpine         "sh -c 'echo Démarr…"   10 seconds ago   Exited (1) 7 seconds ago            crash-test
-# abc123def456   nginx:alpine   "/docker-entrypoint.…"   5 minutes ago    Up 2 minutes                ...     web-test
-```
-
-> Le statut `Exited (1)` indique que le conteneur s'est arrêté en erreur avec le code de sortie `1` (code `0` : arrêt normal).
-
-#### 2. Lire les logs
-
-```bash
-docker logs crash-test
-# Démarrage...
-```
-
-> Le conteneur a affiché "Démarrage...", attendu 2 secondes (`sleep 2`), puis s'est arrêté avec `exit 1`. Les logs montrent la dernière sortie avant le crash.
-
-#### 3. Récupérer le code de sortie
-
-```bash
-# Trouver le chemin JSON d'accès de l'exit code
-docker inspect crash-test | jq -c 'paths' | grep -i exit
-# Récupération de l'exit code
-docker inspect --format '{{.State.ExitCode}}' crash-test
-# 1
-```
-
-Si l'on veut plus de détails sur l'état du conteneur, il est possible d'afficher tout le contenu du state :
-
-```bash
-docker inspect crash-test | jq '.[].State'
-# {
-#   "Status": "exited",
-#   "Running": false,
-#   "Paused": false,
-#   "Restarting": false,
-#   "OOMKilled": false,
-#   "Dead": false,
-#   "Pid": 0,
-#   "ExitCode": 1,
-#   "Error": "",
-#   "StartedAt": "2026-03-02T13:25:37.996510807Z",
-#   "FinishedAt": "2026-03-02T13:25:40.05484897Z"
-# }
-```
-
-> Le champ `OOMKilled: false` indique que le conteneur n'a pas été tué par manque de mémoire. Le champ `ExitCode: 1` confirme une erreur applicative.
-
-### Nettoyage
-
-```bash
-docker rm web-test crash-test
-```
-
-### Bonus : `docker inspect` pour comparer deux conteneurs
-
-Lancer deux conteneurs avec des variables d'environnement différentes :
-
-```bash
-docker run -d --name app-dev -e APP_ENV=development nginx:alpine
-docker run -d --name app-prod -e APP_ENV=production nginx:alpine
-```
-
-Comparer les variables d'environnement :
-
-```bash
-docker inspect app-dev | jq '.[].Config.Env' | grep APP_ENV
-#  "APP_ENV=development",
-docker inspect app-prod | jq '.[].Config.Env' | grep APP_ENV
-#  "APP_ENV=production",
-```
-
-> Les deux conteneurs utilisent la même image mais ont des configurations différentes au runtime.
-
-### Bonus : `docker cp` copier des fichiers vers le conteneur
-
-#### Copier un fichier de l'hôte vers le conteneur
-
-```bash
-# Créer une page HTML personnalisée
-echo "<h1>Ma super page d'acceuil NGINX \!</h1>"  > ./custom.html
-
-# Remplacer le index.html dans le conteneur
-docker cp ./custom.html web-cp:/usr/share/nginx/html/index.html
-
-# Vérifier le résultat
-curl -s http://localhost:8080
-# <h1>Page modifiée via docker cp</h1>
-```
-
-> `docker cp` peut servir pour extraire des fichiers de configuration ou pour injecter rapidement un fichier de test dans un conteneur.
-> **Attention** : les modifications faites via `docker cp` ne persistent pas si le conteneur est recréé (elles ne modifient pas l'image).
-
-### Bonus : `docker cp` copier des fichiers depuis le conteneur
-
-```bash
-docker run -d --name web-cp -p 8080:80 nginx:alpine
-
-# Copier le fichier index.html depuis le conteneur
-docker cp web-cp:/usr/share/nginx/html/index.html ./index.html
-
-cat ./index.html
-# <!DOCTYPE html>
-# <html>
-# <head>
-# <title>Welcome to nginx!</title>
-# ...
-```
-
-## Récapitulatif des points abordés
-
-| Commande                                       | Usage principal                               | En complément                                            |
-| ---------------------------------------------  | --------------------------------------------- | -------------------------------------------------------- |
-| `docker logs -f --tail <N>`                    | Suivre les logs en temps réel                 | Combiner `-f` et `--tail` pour limiter l'affichage       |
-| `docker exec -it <nom ou ID> /bin/sh`          | Explorer l'intérieur d'un conteneur           | Utiliser `/bin/sh` sur les images Alpine                 |
-| `docker inspect --format`                      | Extraire une info précise (IP, ENV, état)     | Combiner avec `jq` pour un JSON lisible                  |
-| `docker stats`                                 | Surveiller CPU, mémoire, réseau en temps réel | `--no-stream` pour un instantané                         |
-| `docker events`                                | Observer les événements du daemon Docker      | `--filter container=X` pour filtrer sur un conteneur     |
-| `docker inspect <nom ou ID> \| jq '.[].State'` | Comprendre pourquoi un conteneur a crashé     | Vérifier `OOMKilled` et `State.Status`                   |
-| `docker cp`                                    | Copier des fichiers depuis/vers un conteneur  | Les modifications ne persistent pas au-delà du conteneur |
+* [Documentation USER](https://docs.docker.com/reference/dockerfile/#user)
+* [Documentation COPY --chown](https://docs.docker.com/reference/dockerfile/#copy---chown)
+* [Bonnes pratiques de sécurité Docker](https://docs.docker.com/build/building/best-practices/#user)
+* [Images .NET et utilisateur non-root](https://devblogs.microsoft.com/dotnet/securing-containers-with-rootless/)
+* [Documentation des commandes de référence](https://docs.docker.com/reference/dockerfile/)
 
 ---
 
-[⬅️ 04-dockerignore](../../tree/04-dockerignore) ·
+[⬅️ 05-troubleshooting](../../tree/05-troubleshooting) ·
 [📋 Sommaire](../../tree/main) ·
-[06-securite-non-root ➡️](../../tree/06-securite-non-root)
+[07-securite-secrets ➡️](../../tree/07-securite-secrets)
 
-[📝 Retour à l'énoncé](../../tree/05-troubleshooting)
+💡 [Voir la solution](../../tree/06-securite-non-root--solution)

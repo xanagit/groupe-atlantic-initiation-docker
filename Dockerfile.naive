@@ -1,0 +1,27 @@
+# ---------- Stage 1 : Build ----------
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /app
+
+# Copie de tous les fichiers d'un coup
+COPY . .
+
+# Restore et publish séparés mais sans optimisation du cache
+RUN dotnet restore
+RUN dotnet publish --configuration Release -o /app/publish
+
+# ---------- Stage 2 : Runtime ----------
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+
+# Installation de curl pour le HEALTHCHECK — commandes séparées
+RUN apt-get update
+RUN apt-get install -y --no-install-recommends curl
+RUN rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=build --chown=app /app/publish .
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:8080/health || exit 1
+
+USER app
+ENTRYPOINT ["dotnet", "HelloOptimisation.dll"]

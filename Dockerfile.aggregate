@@ -1,0 +1,30 @@
+# ---------- Stage 1 : Build ----------
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /app
+
+# Optimiser la copie pour tirer parti du cache Docker
+#       1. Copier d'abord uniquement le fichier *.csproj
+#       2. Exécuter dotnet restore
+#       3. Copier le reste des fichiers sources
+#       4. Exécuter dotnet publish avec --no-restore
+COPY . .
+RUN dotnet restore
+RUN dotnet publish --configuration Release -o /app/publish
+
+# ---------- Stage 2 : Runtime ----------
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+
+# Agréger ces trois commandes RUN en une seule instruction
+# Utiliser && pour chaîner et \ pour les retours à la ligne
+RUN apt-get update
+RUN apt-get install -y --no-install-recommends curl
+RUN rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=build --chown=app /app/publish .
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:8080/health || exit 1
+
+USER app
+ENTRYPOINT ["dotnet", "HelloOptimisation.dll"]

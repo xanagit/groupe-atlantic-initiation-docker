@@ -1,200 +1,260 @@
-# Sécurité : passer des secrets au build : solution
+# Optimisation des stages Docker
 
-[⬅️ 06-securite-non-root](../../tree/06-securite-non-root) ·
-[📋 Sommaire](../../tree/main) ·
-[08-optimisation-stages ➡️](../../tree/08-optimisation-stages)
+[⬅️ 07-securite-secrets](../../tree/07-securite-secrets) ·
+[📋 Sommaire](../../tree/main)
 
-[📝 Retour à l'énoncé](../../tree/07-securite-secrets)
+💡 [Voir la solution](../../tree/08-optimisation-stages--solution)
 
 ---
 
-## Rappel de l'objectif
+## Pourquoi optimiser les stages ?
 
-Vérifier qu'un secret passé via `ARG` est visible dans `docker history`, puis corriger `Dockerfile.secrets` pour utiliser `--mount=type=secret` afin que le secret ne laisse aucune trace dans l'image.
+Comme vu précédemment, `Docker` construit les images couche par couche (layers). Certaines instructions du `Dockerfile` (`FROM`, `COPY`, `RUN`, `ADD`) créent un nouveau layer. Ces layers sont mis en cache et réutilisés lors des builds suivants tant qu'ils n'ont pas été invalidés.
 
-## Solution
+Une mauvaise organisation du Dockerfile peut entraîner :
 
-Ecriture du fichier de secret :
+* **Des rebuilds inutiles** : une modification mineure du code source déclenche le re-téléchargement de toutes les dépendances
+* **Des layers superflus** : chaque `RUN` crée un layer, même si les commandes sont liées
 
-```bash
-echo "mon-super-token-secret-12345" > secret
-```
+Deux optimisations simples permettent d'améliorer significativement les temps de build et la taille de l'image :
 
-### Étape 1 — Vérifier la fuite de secrets avec `ARG`
+1. Séparer le restore des dépendances de la compilation pour exploiter le cache `Docker`
+2. Agréger les commandes `RUN` liées pour réduire le nombre de layers
 
-```bash
-# Build insecure
-docker build \
-  --build-arg API_KEY=$(cat secret) \
-  -t hello-secrets:insecure \
-  -f Dockerfile.insecure \
-  .
-# 1 warning found (use docker --debug to expand):
-# - SecretsUsedInArgOrEnv: Do not use ARG or ENV instructions for sensitive data (ARG "API_KEY") (line 10)
+### Le cache Docker
 
-docker history hello-secrets:insecure | grep -i api_key
-# <missing>      45 minutes ago   RUN |1 API_KEY=mon-super-token-secret-12345 …   4.1kB     buildkit.dockerfile.v0
-# <missing>      45 minutes ago   ARG API_KEY=mon-super-token-secret-12345        0B        buildkit.dockerfile.v0
-```
+`Docker` utilise un mécanisme de cache (layers). Lors d'un build, chaque instruction est comparée à son équivalent en cache :
 
-> La ligne `|1 API_KEY=mon-super-token-secret-12345` montre que `BuildKit` stocke le nom et la valeur des `ARG` dans les métadonnées du layer créée par la commande `RUN`.
-> La valeur du secret est visible en clair : n'importe quelle personne ayant accès à l'image peut récupérer le token avec la commande  `docker history`.
+* Si l'instruction et le contexte (fichiers copiés, commande exécutée) n'ont pas changé, le layer en cache est réutilisé
+* Si un layer est invalidé, tous les layers suivants sont également invalidés et reconstruits
 
-### Étape 2 — Sécuriser le secret avec `--mount=type=secret`
+### Problème : `COPY . .` avant `dotnet restore`
 
-#### `Dockerfile.secrets`
+Dans un Dockerfile naïf, on copie tous les fichiers puis on restore les dépendances :
 
 ```dockerfile
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
-
-WORKDIR /app
 COPY . .
 RUN dotnet restore
 RUN dotnet publish --configuration Release -o /app/publish
-
-# Le secret est accessible à /run/secrets/api_key uniquement pendant cette instruction RUN
-# Il n'est jamais stocké dans un layer de l'image
-RUN --mount=type=secret,id=api_key \
-    API_KEY=$(cat /run/secrets/api_key) && \
-    echo "Authentification réussie (clé : ***)" && \
-    echo "Simulation d'accès au dépôt privé..."
-
-# Le secret /run/secrets/api_key n'existe plus
-RUN ls -ali /run
-
-WORKDIR /app/publish
-USER app
-ENTRYPOINT ["dotnet", "HelloSecrets.dll"]
 ```
 
-Modifications apportées par rapport au `Dockerfile.insecure` :
+La commande `COPY . .` copie tous les fichiers sources. Dès qu'un seul fichier `.cs` change, le layer `COPY` est invalidé, ce qui force le `dotnet restore` à se ré-exécuter même si aucune dépendance n'a changé.
 
-1. Suppression de l'instruction `ARG API_KEY`
-2. Ajout de `--mount=type=secret,id=api_key sur l'instruction `RUN`
-
-La variable `API_KEY` est assignée en lisant le fichier `/run/secrets/api_key`, monté temporairement par BuildKit. Une fois l'instruction `RUN` terminée, le fichier est démonté et aucune valeur n'est persistée dans le layer.
-
-> Il est possible d'ajouter `required=true` pour faire échouer le build si le secret n'est pas fourni : `--mount=type=secret,id=api_key,required=true`.
-
-#### Build sécurisé
-
-```bash
-# Build sécurisé
-docker build \
-  --secret id=api_key,src=secret \
-  -t hello-secrets:secure \
-  -f Dockerfile.secrets \
-  --progress=plain \
-  --no-cache .
-
-# ...
-#11 [build 7/8] RUN ls -ali /run
-#11 0.084 total 12
-#11 0.084 5304257 drwxr-xr-x 1 root root 4096 Mar  3 10:02 .
-#11 0.084 5304258 drwxr-xr-x 1 root root 4096 Mar  3 10:02 ..
-#11 0.084 1583312 drwxrwxrwt 2 root root 4096 Feb 23 00:00 lock
-#11 DONE 0.1s
-# ...
-```
-
-> Dans l'instruction suivante, on ne peut plus accéder au secret qui a été démonté.
-
-#### Vérification : le secret n'est plus dans l'historique
-
-```bash
-docker history hello-secrets:insecure | grep -i api_key
-# <missing>  |1 API_KEY=mon-super-token-secret-12345 ... 
-
-docker history --no-trunc hello-secrets:secure | grep -i api_key
-# <missing> ... API_KEY=$(cat /run/secrets/api_key) ...
-```
-
-Pour confirmer avec l'historique complet :
-
-```bash
-docker history --no-trunc hello-secrets:secure
-```
-
-> La ligne `RUN` du `Dockerfile.secrets` montre uniquement la commande `$(cat /run/secrets/api_key)` qui ne contient pas la valeur du secret, seulement l'instruction pour le lire. La valeur n'a jamais été écrite dans un layer.
-
-### Bonus : Passer le secret depuis une variable d'environnement
-
-Au lieu de lire le secret depuis un fichier, il est possible de le passer directement depuis une variable d'environnement de la machine hôte avec l'option `env` :
-
-```bash
-# Export variable d'environnement
-export API_KEY="mon-super-token-secret-12345"
-
-# Build secure
-docker build \
-  --secret id=api_key,env=API_KEY \
-  -t hello-secrets:secure \
-  -f Dockerfile.secrets \
-  .
-```
-
-Le `Dockerfile.secrets` ne change pas : il lit toujours le secret depuis `/run/secrets/api_key`. C'est `BuildKit` qui se charge de monter la variable d'environnement comme un fichier secret temporaire.
-
-> Cette approche est utile dans les pipelines CI/CD où les secrets sont injectés comme variables d'environnement (GitHub Actions, GitLab CI, Azure Pipelines...) plutôt que stockés dans des fichiers.
-
-### Bonus : Comportement de `required=true` si le secret est absent
-
-Tenter de builder `Dockerfile.secrets` sans fournir le secret :
-
-```bash
-# Build sans spécifier le secret
-docker build \
-  -t hello-secrets:secure \
-  -f Dockerfile.secrets \
-  --no-cache .
-
-# ...
-# > [build 6/8] RUN --mount=type=secret,id=api_key...":
-# 0.101 cat: /run/secrets/api_key: No such file or directory
-# ...
-# ERROR: failed to build: failed to solve: process "/bin/sh -c API_KEY=$(cat /run/secrets/api_key) ... did not complete successfully: exit code: 1
-```
-
-> Sans `required=true`, le build se poursuit en silence, le fichier `/run/secrets/api_key` n'existe pas et la commande `cat` échoue avec une erreur peu explicite.
-
-Ajout de `required=true` :
+La solution pour éviter ce comportement est de copier d'abord uniquement le fichier `.csproj` (ou le fichier qui décrit les dépendances), exécuter le restore, puis copier le reste des sources :
 
 ```dockerfile
-RUN --mount=type=secret,id=api_key,required=true \
-    API_KEY=$(cat /run/secrets/api_key) && \
-    echo "Authentification réussie (clé : ***)" && \
-    echo "Simulation d'accès au dépôt privé..."
+# Copie du seul csproj
+COPY *.csproj .
+# Restore (création d'un layer)
+RUN dotnet restore
+# copie des fichiers source
+COPY . .
+# Publish sans relancer le restore
+RUN dotnet publish --configuration Release -o /app/publish --no-restore
 ```
 
-L'erreur lors du build est maintenant plus explicite :
+> Le flag `--no-restore` de `dotnet publish` évite de relancer le restore puisqu'il a déjà été fait.
+
+| Approche                      | Modification d'un `.cs`         | Modification du `.csproj`      |
+| ----------------------------- | ------------------------------- | ------------------------------ |
+| `COPY . .` puis `restore`     | ❌ Restore complet (cache raté) | ❌ Restore complet             |
+| `COPY .csproj` puis `restore` | ✅ Restore en cache             | Restore complet (attendu)      |
+
+### Problème : commandes `RUN` séparées
+
+Chaque instruction `RUN` crée un layer distinct dans l'image. Quand plusieurs commandes sont liées (comme l'installation de paquets), les séparer pose deux problèmes :
+
+#### 1. Layers inutiles et image plus volumineuse
+
+```dockerfile
+RUN apt-get update
+RUN apt-get install -y curl
+RUN rm -rf /var/lib/apt/lists/*
+```
+
+Le `rm` dans le troisième layer ne réduit pas la taille de l'image : les fichiers supprimés sont toujours présents dans les layers précédents. Les layers Docker sont immuables et additifs.
+
+#### 2. Cache incohérent
+
+Si le layer `apt-get update` est en cache mais que les dépôts ont été mis à jour côté serveur, `apt-get install` peut échouer ou installer une version obsolète.
+Pour cette raison, il est préférable d'agréger les commandes liées en un seul `RUN` avec `&&` :
+
+```dockerfile
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    # Supression du cache local des indexes de paquets
+    && rm -rf /var/lib/apt/lists/*
+```
+
+> Utiliser `\` pour les retours à la ligne et `&&` pour chaîner les commandes et donner une meilleur lisibilité. Le nettoyage (`rm -rf /var/lib/apt/lists/*`) dans le même `RUN` réduit réellement la taille du layer.
+
+## Mise en pratique
+
+### But
+
+1. Identifier les impacts d'un `Dockerfile` non optimisé sur le cache et les layers
+2. Optimiser la séparation `restore` / `publish` pour exploiter le cache `Docker`
+3. Agréger les commandes `RUN` pour réduire le nombre de layers et la taille de l'image
+
+### L'application
+
+L'application reprend l'API web `ASP.NET Core 8.0` des exercices précédents. `curl` est installé dans l'image de runtime pour le `HEALTHCHECK`.
+
+Endpoints exposés :
+
+* `GET /` : JSON avec le titre et un message
+* `GET /health` : JSON `{ "status": "up" }`
+
+### Étape 1 — Identifier le comportement sans optimisation
+
+Construire l'image à partir du `Dockerfile.naive` :
 
 ```bash
-# Build sans spécifier le secret
-docker build \
-  -t hello-secrets:secure \
-  -f Dockerfile.secrets-required \
-  --no-cache .
-
-# ...
-# ERROR: failed to build: failed to solve: secret api_key: not found
+# Build de l'image
+docker build -t hello-optimisation:naive -f Dockerfile.naive .
 ```
 
-## Récapitulatif des points abordés
+Vérifier que l'application fonctionne :
 
-| Bonne pratique                                     | Pourquoi                                                                                        |
-| -------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| Ne jamais passer un secret via `ARG`               | La valeur est stockée dans les métadonnées de l'image et visible via `docker history`           |
-| Ne jamais passer un secret via `ENV`               | La valeur persiste dans l'image finale et est visible via `docker inspect`                      |
-| Ne jamais copier un fichier `.env` dans l'image    | Son contenu se retrouve dans un layer et ne peut pas être effacé après coup                     |
-| Utiliser `--mount=type=secret`                     | Le secret est accessible uniquement pendant le `RUN`, sans jamais être écrit dans un layer      |
-| Ajouter `required=true`                            | Le build échoue explicitement si le secret est absent, plutôt que de continuer silencieusement  |
-| Ajouter le fichier secret dans `.gitignore`        | Évite de commiter accidentellement le secret dans le dépôt Git                                  |
-| Ajouter le fichier secret dans `.dockerignore`     | Évite d'inclure le secret dans le build context (même si `--mount` ne le copie pas)             |
+```bash
+# Lancer le conteneur
+docker run -d -p 8080:8080 --name opti-naive hello-optimisation:naive
+
+# Tester l'API
+curl -s http://localhost:8080 | jq
+curl -s http://localhost:8080/health | jq
+```
+
+Vérifier le nombre de layers avec `docker history` :
+
+```bash
+docker history hello-optimisation:naive
+```
+
+Maintenant, modifier le code source sans changer les dépendances :
+
+```bash
+echo "\n// Nouveau commentaire" >> Program.cs
+```
+
+```bash
+# Reconstruire l'image
+docker build -t hello-optimisation:naive -f Dockerfile.naive .
+```
+
+> Observer la sortie du build : le `dotnet restore` est ré-exécuté alors qu'aucune dépendance n'a changé. Tout le build est relancé à partir de `COPY . .`.
+
+### Étape 2 — Optimiser le cache avec la séparation restore / publish
+
+Modifier le `Dockerfile.optimized` dans le stage `build` pour :
+
+1. Copier d'abord uniquement le fichier `*.csproj`
+2. Exécuter `dotnet restore`
+3. Copier ensuite le reste des fichiers sources
+4. Exécuter `dotnet publish` avec le flag `--no-restore`
+
+Construire l'image et vérifier que l'application fonctionne :
+
+```bash
+# Build de l'image optimisée
+docker build -t hello-optimisation:optimized -f Dockerfile.optimized .
+
+# Lancer le conteneur
+docker run -d -p 8080:8080 --name opti-optimized hello-optimisation:optimized
+
+# Tester l'API
+curl -s http://localhost:8080 | jq
+```
+
+Puis tester l'impact du cache en modifiant à nouveau `Program.cs` :
+
+```bash
+# Modifier le message dans Program.cs
+echo "\n// Nouveau commentaire" >> Program.cs
+
+# Reconstruire
+docker build -t hello-optimisation:optimized -f Dockerfile.optimized .
+```
+
+> Cette fois, le `dotnet restore` utilise le cache (ligne `CACHED` dans la sortie du build). Seuls le `COPY . .` et le `dotnet publish` sont ré-exécutés.
+
+### Étape 3 — Agréger les commandes `RUN`
+
+Modifier `Dockerfile.aggregate` dans le stage `runtime` pour agréger les trois commandes `RUN` (`apt-get update`, `apt-get install` et `rm`) en une seule instruction.
+Intégrer aussi les modification réalisées à l'étape précédente.
+
+Reconstruire et comparer le nombre de layers :
+
+```bash
+# Rebuild
+docker build -t hello-optimisation:aggregate -f Dockerfile.aggregate .
+
+# Comparer les layers
+docker history hello-optimisation:naive
+docker history hello-optimisation:optimized
+docker history hello-optimisation:aggregate
+```
+
+### Validation
+
+* [ ] `docker build` se termine sans erreur pour les deux Dockerfiles
+* [ ] `curl -s http://localhost:8080` retourne le JSON
+* [ ] `curl -s http://localhost:8080/health` retourne `{ "status": "up" }`
+* [ ] Après modification de `Program.cs`, le rebuild avec `Dockerfile.optimized` affiche `CACHED` pour le layer `dotnet restore`
+* [ ] `docker history` montre moins de layers pour l'image optimisée que pour l'image `naive`
+* [ ] L'application fonctionne correctement avec l'image optimisée
+
+### Commandes de build & run
+
+```bash
+# Construire les versions
+docker build -t hello-optimisation:naive -f Dockerfile.naive .
+docker build -t hello-optimisation:optimized -f Dockerfile.optimized .
+docker build -t hello-optimisation:aggregate -f Dockerfile.aggregate .
+
+# Lancer les conteneurs
+docker run -d -p 8080:8080 --name opti-naive hello-optimisation:naive
+docker run -d -p 8080:8080 --name opti-optimized hello-optimisation:optimized
+docker run -d -p 8080:8080 --name opti-aggregate hello-optimisation:aggregate
+```
+
+Commandes utiles :
+
+```bash
+# Tester l'API
+curl -s http://localhost:8080 | jq
+curl -s http://localhost:8080/health | jq
+
+# Comparer les layers
+docker history hello-optimisation:naive
+docker history hello-optimisation:optimized
+docker history hello-optimisation:aggregate
+
+# Voir le nombre de layers
+docker history hello-optimisation:naive | wc -l
+docker history hello-optimisation:optimized | wc -l
+docker history hello-optimisation:aggregate | wc -l
+
+# Comparer les tailles
+docker image ls hello-optimisation
+```
+
+### Bonus
+
+* Comparer les temps de rebuild avec `time docker build ...` après une modification de `Program.cs`
+
+### Liens utiles
+
+* [Documentation sur le cache de build](https://docs.docker.com/build/cache/)
+* [Documentation sur les bonnes pratiques Dockerfile](https://docs.docker.com/build/building/best-practices/)
+* [Optimiser les layers](https://docs.docker.com/build/cache/optimize/)
+* [Documentation des commandes de référence](https://docs.docker.com/reference/dockerfile/)
 
 ---
 
-[⬅️ 06-securite-non-root](../../tree/06-securite-non-root) ·
-[📋 Sommaire](../../tree/main) ·
-[08-optimisation-stages ➡️](../../tree/08-optimisation-stages)
+[⬅️ 07-securite-secrets](../../tree/07-securite-secrets) ·
+[📋 Sommaire](../../tree/main)
 
-[📝 Retour à l'énoncé](../../tree/07-securite-secrets)
+💡 [Voir la solution](../../tree/08-optimisation-stages--solution)
+
+---

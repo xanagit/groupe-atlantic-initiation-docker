@@ -2,23 +2,25 @@
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /app
 
-# Optimiser la copie pour tirer parti du cache Docker
-#       1. Copier d'abord uniquement le fichier *.csproj
-#       2. Exécuter dotnet restore
-#       3. Copier le reste des fichiers sources
-#       4. Exécuter dotnet publish avec --no-restore
-COPY . .
+# Copie du seul fichier csproj (décrit les dépendances)
+COPY *.csproj .
+
+# Restore des dépendances (ce layer est mis en cache tant que le csproj ne change pas)
 RUN dotnet restore
-RUN dotnet publish --configuration Release -o /app/publish
+
+# Copie du reste des fichiers sources
+COPY . .
+
+# Publish sans relancer le restore (déjà fait et en cache)
+RUN dotnet publish --configuration Release -o /app/publish --no-restore
 
 # ---------- Stage 2 : Runtime ----------
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 
-# Agréger ces trois commandes RUN en une seule instruction
-# Utiliser && pour chaîner et \ pour les retours à la ligne
-RUN apt-get update
-RUN apt-get install -y --no-install-recommends curl
-RUN rm -rf /var/lib/apt/lists/*
+# Installation de curl pour le HEALTHCHECK : commandes agrégées en un seul layer
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends curl \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=build --chown=app /app/publish .

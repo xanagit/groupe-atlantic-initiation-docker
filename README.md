@@ -1,260 +1,227 @@
-# Optimisation des stages Docker
+# Optimisation des stages Docker : solution
 
 [⬅️ 07-securite-secrets](../../tree/07-securite-secrets) ·
 [📋 Sommaire](../../tree/main)
 
-💡 [Voir la solution](../../tree/08-optimisation-stages--solution)
+[📝 Retour à l'énoncé](../../tree/08-optimisation-stages)
 
 ---
 
-## Pourquoi optimiser les stages ?
+## Rappel de l'objectif
 
-Comme vu précédemment, `Docker` construit les images couche par couche (layers). Certaines instructions du `Dockerfile` (`FROM`, `COPY`, `RUN`, `ADD`) créent un nouveau layer. Ces layers sont mis en cache et réutilisés lors des builds suivants tant qu'ils n'ont pas été invalidés.
+Identifier les impacts d'un `Dockerfile` non optimisé sur le cache et les layers, optimiser la séparation `restore` / `publish` pour exploiter le cache Docker, et agréger les commandes `RUN` pour réduire le nombre de layers.
 
-Une mauvaise organisation du Dockerfile peut entraîner :
-
-* **Des rebuilds inutiles** : une modification mineure du code source déclenche le re-téléchargement de toutes les dépendances
-* **Des layers superflus** : chaque `RUN` crée un layer, même si les commandes sont liées
-
-Deux optimisations simples permettent d'améliorer significativement les temps de build et la taille de l'image :
-
-1. Séparer le restore des dépendances de la compilation pour exploiter le cache `Docker`
-2. Agréger les commandes `RUN` liées pour réduire le nombre de layers
-
-### Le cache Docker
-
-`Docker` utilise un mécanisme de cache (layers). Lors d'un build, chaque instruction est comparée à son équivalent en cache :
-
-* Si l'instruction et le contexte (fichiers copiés, commande exécutée) n'ont pas changé, le layer en cache est réutilisé
-* Si un layer est invalidé, tous les layers suivants sont également invalidés et reconstruits
-
-### Problème : `COPY . .` avant `dotnet restore`
-
-Dans un Dockerfile naïf, on copie tous les fichiers puis on restore les dépendances :
-
-```dockerfile
-COPY . .
-RUN dotnet restore
-RUN dotnet publish --configuration Release -o /app/publish
-```
-
-La commande `COPY . .` copie tous les fichiers sources. Dès qu'un seul fichier `.cs` change, le layer `COPY` est invalidé, ce qui force le `dotnet restore` à se ré-exécuter même si aucune dépendance n'a changé.
-
-La solution pour éviter ce comportement est de copier d'abord uniquement le fichier `.csproj` (ou le fichier qui décrit les dépendances), exécuter le restore, puis copier le reste des sources :
-
-```dockerfile
-# Copie du seul csproj
-COPY *.csproj .
-# Restore (création d'un layer)
-RUN dotnet restore
-# copie des fichiers source
-COPY . .
-# Publish sans relancer le restore
-RUN dotnet publish --configuration Release -o /app/publish --no-restore
-```
-
-> Le flag `--no-restore` de `dotnet publish` évite de relancer le restore puisqu'il a déjà été fait.
-
-| Approche                      | Modification d'un `.cs`         | Modification du `.csproj`      |
-| ----------------------------- | ------------------------------- | ------------------------------ |
-| `COPY . .` puis `restore`     | ❌ Restore complet (cache raté) | ❌ Restore complet             |
-| `COPY .csproj` puis `restore` | ✅ Restore en cache             | Restore complet (attendu)      |
-
-### Problème : commandes `RUN` séparées
-
-Chaque instruction `RUN` crée un layer distinct dans l'image. Quand plusieurs commandes sont liées (comme l'installation de paquets), les séparer pose deux problèmes :
-
-#### 1. Layers inutiles et image plus volumineuse
-
-```dockerfile
-RUN apt-get update
-RUN apt-get install -y curl
-RUN rm -rf /var/lib/apt/lists/*
-```
-
-Le `rm` dans le troisième layer ne réduit pas la taille de l'image : les fichiers supprimés sont toujours présents dans les layers précédents. Les layers Docker sont immuables et additifs.
-
-#### 2. Cache incohérent
-
-Si le layer `apt-get update` est en cache mais que les dépôts ont été mis à jour côté serveur, `apt-get install` peut échouer ou installer une version obsolète.
-Pour cette raison, il est préférable d'agréger les commandes liées en un seul `RUN` avec `&&` :
-
-```dockerfile
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
-    # Supression du cache local des indexes de paquets
-    && rm -rf /var/lib/apt/lists/*
-```
-
-> Utiliser `\` pour les retours à la ligne et `&&` pour chaîner les commandes et donner une meilleur lisibilité. Le nettoyage (`rm -rf /var/lib/apt/lists/*`) dans le même `RUN` réduit réellement la taille du layer.
-
-## Mise en pratique
-
-### But
-
-1. Identifier les impacts d'un `Dockerfile` non optimisé sur le cache et les layers
-2. Optimiser la séparation `restore` / `publish` pour exploiter le cache `Docker`
-3. Agréger les commandes `RUN` pour réduire le nombre de layers et la taille de l'image
-
-### L'application
-
-L'application reprend l'API web `ASP.NET Core 8.0` des exercices précédents. `curl` est installé dans l'image de runtime pour le `HEALTHCHECK`.
-
-Endpoints exposés :
-
-* `GET /` : JSON avec le titre et un message
-* `GET /health` : JSON `{ "status": "up" }`
+## Solution
 
 ### Étape 1 — Identifier le comportement sans optimisation
 
-Construire l'image à partir du `Dockerfile.naive` :
+#### Build et lancement
 
 ```bash
-# Build de l'image
+# Build de l'image naive
 docker build -t hello-optimisation:naive -f Dockerfile.naive .
-```
 
-Vérifier que l'application fonctionne :
-
-```bash
 # Lancer le conteneur
 docker run -d -p 8080:8080 --name opti-naive hello-optimisation:naive
-
-# Tester l'API
-curl -s http://localhost:8080 | jq
-curl -s http://localhost:8080/health | jq
 ```
 
-Vérifier le nombre de layers avec `docker history` :
+#### Vérification de l'API
+
+```bash
+curl -s http://localhost:8080 | jq
+# {
+#   "title": "Hello Optimisation !",
+#   "message": "L'application a été construite avec succès !"
+# }
+
+curl -s http://localhost:8080/health | jq
+# { "status": "up" }
+```
+
+#### Observer les layers
 
 ```bash
 docker history hello-optimisation:naive
+# CREATED BY                                      SIZE
+# HEALTHCHECK &{["CMD-SHELL" "curl -f http://l…   0B
+# COPY --chown=app /app/publish . # buildkit      285kB
+# RUN /bin/sh -c rm -rf /var/lib/apt/lists/*      0B
+# RUN /bin/sh -c apt-get install -y --no-insta…   41.5MB
+# RUN /bin/sh -c apt-get update # buildkit        26.5MB
+# ...            ...
 ```
 
-Maintenant, modifier le code source sans changer les dépendances :
+> On voit 3 layers distincts pour l'installation de `curl` : `apt-get update`, `apt-get install` et `rm`. Le layer `rm` fait `0B` car les fichiers supprimés sont toujours présents dans les layers précédents — la suppression n'a aucun effet sur la taille finale de l'image.
+
+#### Simuler une modification du code source
 
 ```bash
+# Ajouter un commentaire dans Program.cs
 echo "\n// Nouveau commentaire" >> Program.cs
-```
 
-```bash
 # Reconstruire l'image
 docker build -t hello-optimisation:naive -f Dockerfile.naive .
+# => [build 3/5] COPY . .                                                          0.0s
+#  => [build 4/5] RUN dotnet restore                                               0.5s
+#  => [build 5/5] RUN dotnet publish --configuration Release -o /app/publish       1.5s
 ```
 
-> Observer la sortie du build : le `dotnet restore` est ré-exécuté alors qu'aucune dépendance n'a changé. Tout le build est relancé à partir de `COPY . .`.
+> Le `dotnet restore` est ré-exécuté (pas de `CACHED`) alors qu'aucune dépendance n'a changé. Le `COPY . .` invalide le cache car un fichier source a été modifié, et tous les layers suivants (y compris le restore) sont reconstruits en cascade.
 
 ### Étape 2 — Optimiser le cache avec la séparation restore / publish
 
-Modifier le `Dockerfile.optimized` dans le stage `build` pour :
+#### `Dockerfile.optimized`
 
-1. Copier d'abord uniquement le fichier `*.csproj`
-2. Exécuter `dotnet restore`
-3. Copier ensuite le reste des fichiers sources
-4. Exécuter `dotnet publish` avec le flag `--no-restore`
+```dockerfile
+...
+# Copie du seul fichier csproj (décrit les dépendances)
+COPY *.csproj .
 
-Construire l'image et vérifier que l'application fonctionne :
+# Restore des dépendances (ce layer est mis en cache tant que le csproj ne change pas)
+RUN dotnet restore
 
-```bash
-# Build de l'image optimisée
-docker build -t hello-optimisation:optimized -f Dockerfile.optimized .
+# Copie du reste des fichiers sources
+COPY . .
 
-# Lancer le conteneur
-docker run -d -p 8080:8080 --name opti-optimized hello-optimisation:optimized
+# Publish sans relancer le restore (déjà fait et en cache)
+RUN dotnet publish --configuration Release -o /app/publish --no-restore
 
-# Tester l'API
-curl -s http://localhost:8080 | jq
+...
 ```
 
-Puis tester l'impact du cache en modifiant à nouveau `Program.cs` :
+> Le `COPY *.csproj .` ne copie que le fichier de description des dépendances. Le layer `RUN dotnet restore` est mis en cache et ne sera invalidé que si le `.csproj` change (ajout/suppression d'un package `NuGet`). Les modifications de fichiers `.cs` n'invalident plus le restore. Le flag `--no-restore` de `dotnet publish` est indispensable pour éviter de relancer un restore implicite qui annulerait le bénéfice de la séparation.
+
+#### Build et vérification du cache
 
 ```bash
-# Modifier le message dans Program.cs
+# Premier build (tout est construit)
+docker build -t hello-optimisation:optimized -f Dockerfile.optimized .
+```
+
+#### Test de l'optimisation du cache
+
+```bash
+# Modifier le code source
 echo "\n// Nouveau commentaire" >> Program.cs
 
 # Reconstruire
 docker build -t hello-optimisation:optimized -f Dockerfile.optimized .
+# => CACHED [build 2/6] WORKDIR /app                                                                                                                             0.0s
+# => CACHED [build 3/6] COPY *.csproj .                                                                                                                          0.0s
+# => CACHED [build 4/6] RUN dotnet restore                                                                                                                       0.0s
+# => [build 5/6] COPY . .                                                                                                                                        0.0s
+# => [build 6/6] RUN dotnet publish --configuration Release -o /app/publish --no-restore
 ```
 
-> Cette fois, le `dotnet restore` utilise le cache (ligne `CACHED` dans la sortie du build). Seuls le `COPY . .` et le `dotnet publish` sont ré-exécutés.
+> Le `dotnet restore` affiche `CACHED` : les dépendances ne sont pas re-téléchargées. Seuls le `COPY . .` et le `dotnet publish` sont ré-exécutés.
 
 ### Étape 3 — Agréger les commandes `RUN`
 
-Modifier `Dockerfile.aggregate` dans le stage `runtime` pour agréger les trois commandes `RUN` (`apt-get update`, `apt-get install` et `rm`) en une seule instruction.
-Intégrer aussi les modification réalisées à l'étape précédente.
+#### `Dockerfile.aggregate`
 
-Reconstruire et comparer le nombre de layers :
+```dockerfile
+# ---------- Stage 1 : Build ----------
+...
+
+# Installation de curl pour le HEALTHCHECK : commandes agrégées en un seul layer
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+...
+```
+
+> Les trois commandes `apt-get update`, `apt-get install` et `rm -rf` sont regroupées dans un seul `RUN` avec `&&`. Le nettoyage du cache apt (`rm -rf /var/lib/apt/lists/*`) dans le même layer réduit réellement la taille de l'image car les fichiers supprimés ne sont jamais écrits dans un layer séparé.
+
+#### Build et comparaison des layers
 
 ```bash
-# Rebuild
+# Build de l'image agrégée
 docker build -t hello-optimisation:aggregate -f Dockerfile.aggregate .
 
 # Comparer les layers
 docker history hello-optimisation:naive
+# ...
+# <missing> RUN /bin/sh -c rm -rf /var/lib/apt/lists/* #…   20.5kB
+# <missing> RUN /bin/sh -c apt-get install -y --no-insta…   6.25MB
+# <missing> RUN /bin/sh -c apt-get update # buildkit        19.5MB
+
 docker history hello-optimisation:optimized
+# ...
+# <missing> RUN /bin/sh -c rm -rf /var/lib/apt/lists/* #…   20.5kB
+# <missing> RUN /bin/sh -c apt-get install -y --no-insta…   6.25MB
+# <missing> RUN /bin/sh -c apt-get update # buildkit        19.5MB
+
 docker history hello-optimisation:aggregate
+# <missing>      About a minute ago   RUN /bin/sh -c apt-get update   && apt-get i…   6.25MB    buildkit.dockerfile.v0
 ```
 
-### Validation
+> L'agrégation des commandes permet de faire gagner quelques `MB` à l'image finale.
 
-* [ ] `docker build` se termine sans erreur pour les deux Dockerfiles
-* [ ] `curl -s http://localhost:8080` retourne le JSON
-* [ ] `curl -s http://localhost:8080/health` retourne `{ "status": "up" }`
-* [ ] Après modification de `Program.cs`, le rebuild avec `Dockerfile.optimized` affiche `CACHED` pour le layer `dotnet restore`
-* [ ] `docker history` montre moins de layers pour l'image optimisée que pour l'image `naive`
-* [ ] L'application fonctionne correctement avec l'image optimisée
-
-### Commandes de build & run
+#### Comparaison du nombre de layers
 
 ```bash
-# Construire les versions
-docker build -t hello-optimisation:naive -f Dockerfile.naive .
-docker build -t hello-optimisation:optimized -f Dockerfile.optimized .
-docker build -t hello-optimisation:aggregate -f Dockerfile.aggregate .
-
-# Lancer les conteneurs
-docker run -d -p 8080:8080 --name opti-naive hello-optimisation:naive
-docker run -d -p 8080:8080 --name opti-optimized hello-optimisation:optimized
-docker run -d -p 8080:8080 --name opti-aggregate hello-optimisation:aggregate
-```
-
-Commandes utiles :
-
-```bash
-# Tester l'API
-curl -s http://localhost:8080 | jq
-curl -s http://localhost:8080/health | jq
-
-# Comparer les layers
-docker history hello-optimisation:naive
-docker history hello-optimisation:optimized
-docker history hello-optimisation:aggregate
-
-# Voir le nombre de layers
 docker history hello-optimisation:naive | wc -l
-docker history hello-optimisation:optimized | wc -l
-docker history hello-optimisation:aggregate | wc -l
+# ~18 => 17 sans le header
 
-# Comparer les tailles
-docker image ls hello-optimisation
+docker history hello-optimisation:optimized | wc -l
+# ~18 => 17 sans le header
+
+docker history hello-optimisation:aggregate | wc -l
+# ~16 => 15 sans le header
 ```
 
-### Bonus
+> L'image `aggregate` a 2 layers de moins que les deux autres car les 3 `RUN apt-get` sont fusionnés en un seul.
 
-* Comparer les temps de rebuild avec `time docker build ...` après une modification de `Program.cs`
+#### Comparaison des tailles d'image
 
-### Liens utiles
+```bash
+docker image ls hello-optimisation
+# IMAGE                        CONTENT SIZE
+# hello-optimisation:naive            106MB
+# hello-optimisation:optimized        106MB
+# hello-optimisation:aggregate       90.6MB
+```
 
-* [Documentation sur le cache de build](https://docs.docker.com/build/cache/)
-* [Documentation sur les bonnes pratiques Dockerfile](https://docs.docker.com/build/building/best-practices/)
-* [Optimiser les layers](https://docs.docker.com/build/cache/optimize/)
-* [Documentation des commandes de référence](https://docs.docker.com/reference/dockerfile/)
+> L'image `aggregate` est plus légère car le `rm -rf /var/lib/apt/lists/*` dans le même layer que `apt-get update` supprime effectivement les fichiers d'index. Dans les versions `naive` et `optimized`, le `rm` est dans un layer séparé : les fichiers d'index restent dans le layer `apt-get update` et occupent de l'espace.
+
+### Bonus : comparaison des temps de rebuild
+
+```bash
+# Modifier Program.cs
+echo "\n// test" >> Program.cs
+
+# Comparer les temps de rebuild
+time docker build -t hello-optimisation:naive -f Dockerfile.naive .
+# ...
+# docker build -t hello-optimisation:naive -f Dockerfile.naive .  0,09s user 0,06s system 5% cpu 2,573 total
+
+time docker build -t hello-optimisation:optimized -f Dockerfile.optimized .
+# ...
+# docker build -t hello-optimisation:optimized -f Dockerfile.optimized .  0,08s user 0,06s system 7% cpu 0,518 total
+
+time docker build -t hello-optimisation:aggregate -f Dockerfile.aggregate .
+# ...
+# docker build -t hello-optimisation:aggregate -f Dockerfile.aggregate .  0,08s user 0,06s system 32% cpu 0,402 total
+```
+
+> Les images `optimized` et `aggregate` sont plus rapides à reconstruire car le `dotnet restore` est en cache. Le gain dépend du nombre de dépendances NuGet du projet.
+
+## Récapitulatif des points abordés
+
+| Bonne pratique                                      | Pourquoi                                                                                           |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `COPY *.csproj` avant `dotnet restore`              | Le restore n'est relancé que si les dépendances changent, pas à chaque modification de code source |
+| `--no-restore` sur `dotnet publish`                 | Évite un restore implicite qui annulerait le bénéfice de la séparation                             |
+| Agréger les `RUN` liés avec `&&`                    | Réduit le nombre de layers et permet au nettoyage (`rm`) d'être effectif dans le même layer        |
+| `rm -rf /var/lib/apt/lists/*` dans le même `RUN`    | La suppression des index apt dans le même layer réduit la taille de l'image                        |
+| Placer les instructions les moins volatiles en haut | Les layers stables (restore, install) restent en cache quand seul le code source change            |
 
 ---
 
 [⬅️ 07-securite-secrets](../../tree/07-securite-secrets) ·
 [📋 Sommaire](../../tree/main)
 
-💡 [Voir la solution](../../tree/08-optimisation-stages--solution)
+[📝 Retour à l'énoncé](../../tree/08-optimisation-stages)
 
 ---

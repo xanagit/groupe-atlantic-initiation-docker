@@ -3,9 +3,8 @@ var app = builder.Build();
 
 app.MapGet("/", () => new
 {
-    title = "Hello Sécurité !",
-    user = Environment.UserName,
-    message = "Le endpoint / fonctionne correctement !"
+    title = "Hello Secrets !",
+    message = "L'application a été construite avec succès !"
 });
 
 app.MapGet("/health", () => new { status = "up" });

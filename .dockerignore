@@ -14,3 +14,10 @@ Dockerfile*
 # Documentation
 images/
 README.md
+
+# Secrets
+secret.txt
+*.secret
+.env
+*.pem
+*.key

@@ -4,3 +4,6 @@ node_modules
 publish
 build
 .DS_Store
+secret
+*.secret
+.env
